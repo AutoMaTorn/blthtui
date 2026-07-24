@@ -3,6 +3,8 @@
 #include "ui.h"
 #include "log.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <newt.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -152,18 +154,36 @@ static void format_device(const bt_device *d, char *buf, size_t sz) {
     snprintf(buf, sz, "%s%s%s", mark, name, rssi);
 }
 
-/* Refresh the status line and device list in place, preserving the cursor.
- * Returns the number of devices now shown. */
+/* What the list is currently showing, narrowed from the model. */
+typedef struct {
+    char filter[32];   /* substring match on the name, "" for all */
+    bool paired_only;
+} ui_view;
+
+/* Case-insensitive substring match, ASCII folding only — enough for the
+ * "type a few letters to find your headset" case this serves. */
+static bool name_matches(const char *name, const char *needle) {
+    if (!*needle) return true;
+    size_t nl = strlen(needle);
+    for (const char *p = name; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == nl) return true;
+    }
+    return false;
+}
+
 /* Redraw from the model. No bus traffic at all in the common case: the device
  * list and the adapter state are already current, kept there by the signal
  * handlers in bt.c.
  *
- * `devs` is the UI's own snapshot of what is on screen. Copying it here rather
- * than holding a pointer into the model keeps the listbox rows and the array
- * the selection indexes into consistent: bt_process() may reorder or drop
- * model entries at any point between two redraws. */
+ * `devs` is the UI's own snapshot of what is on screen — the filtered subset,
+ * in display order. Copying rather than holding a pointer into the model keeps
+ * the listbox rows and the array the selection indexes into consistent:
+ * bt_process() may reorder or drop model entries between two redraws. */
 static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
-                   bt_device *devs, int keep_sel) {
+                   bt_device *devs, int keep_sel, const ui_view *view) {
     /* The adapter can vanish under us — an unplugged dongle, rfkill, a
      * bluetoothd restart. Say so instead of showing a stale list while every
      * call quietly fails. */
@@ -176,27 +196,51 @@ static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
     }
 
     const bt_device *model = NULL;
-    int n = bt_devices(ctx, &model);
-    if (n < 0) n = 0;
-    if (n > BT_MAX_DEVICES) n = BT_MAX_DEVICES;
-    if (n > 0) memcpy(devs, model, (size_t)n * sizeof *devs);
+    int total = bt_devices(ctx, &model);
+    if (total < 0) total = 0;
 
-    char status[80];
-    snprintf(status, sizeof status, "Bluetooth: %-3s   Scanning: %-3s%s",
-             bt_powered(ctx) ? "on" : "off",
-             bt_discovering(ctx) ? "yes" : "no",
-             bt_live_updates(ctx) ? "" : "   [polling]");
+    int n = 0;
+    for (int i = 0; i < total && n < BT_MAX_DEVICES; i++) {
+        if (view->paired_only && !model[i].paired) continue;
+        if (!name_matches(model[i].name, view->filter)) continue;
+        devs[n++] = model[i];
+    }
+
+    char status[120];
+    const char *busy = bt_action_active(ctx);
+    if (busy) {
+        snprintf(status, sizeof status, "%s...", busy);
+    } else {
+        char extra[48] = "";
+        if (view->paired_only || view->filter[0])
+            snprintf(extra, sizeof extra, "   [%s%s%s]",
+                     view->paired_only ? "paired" : "",
+                     (view->paired_only && view->filter[0]) ? " " : "",
+                     view->filter);
+        snprintf(status, sizeof status, "Bluetooth: %-3s   Scanning: %-3s%s%s",
+                 bt_powered(ctx) ? "on" : "off",
+                 bt_discovering(ctx) ? "yes" : "no",
+                 bt_live_updates(ctx) ? "" : "   [polling]", extra);
+    }
     newtLabelSetText(label, status);
 
     newtListboxClear(list);
     if (n == 0) {
-        newtListboxAppendEntry(list, "  (no devices — press <Scan>)", NULL);
+        newtListboxAppendEntry(list,
+            (view->filter[0] || view->paired_only) ? "  (nothing matches the filter)"
+                                                   : "  (no devices — press <Scan>)",
+            NULL);
     } else {
         for (int i = 0; i < n; i++) {
             char line[256];
             format_device(&devs[i], line, sizeof line);
             newtListboxAppendEntry(list, line, (void *)(intptr_t)i);
         }
+        /* -1 as the row's data: selecting the notice must not act on devs[0],
+         * which is what a NULL payload would decode to. */
+        if (bt_truncated(ctx))
+            newtListboxAppendEntry(list, "  ... list full, some devices hidden",
+                                   (void *)(intptr_t)-1);
     }
     if (keep_sel >= n) keep_sel = n > 0 ? n - 1 : 0;
     if (keep_sel < 0) keep_sel = 0;
@@ -204,11 +248,60 @@ static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
     return n;
 }
 
+/* Details BlueZ knows but the one-line list has no room for. */
+static void show_details(bt_ctx *ctx, const bt_device *d) {
+    bt_devinfo info;
+    bt_device_info(ctx, d->path, &info);
+
+    char body[768];
+    int k = snprintf(body, sizeof body,
+                     "%s\n\nAddress:    %s\nStatus:     %s, %s, %s\n",
+                     d->name, d->address,
+                     d->connected ? "connected" : "not connected",
+                     d->paired ? "paired" : "not paired",
+                     d->trusted ? "trusted" : "not trusted");
+
+    if (d->has_rssi && k < (int)sizeof body)
+        k += snprintf(body + k, sizeof body - k, "Signal:     %d dBm\n", d->rssi);
+    if (info.has_battery && k < (int)sizeof body)
+        k += snprintf(body + k, sizeof body - k, "Battery:    %d%%\n", info.battery);
+    if (info.icon[0] && k < (int)sizeof body)
+        k += snprintf(body + k, sizeof body - k, "Type:       %s\n", info.icon);
+
+    if (info.nuuid && k < (int)sizeof body) {
+        k += snprintf(body + k, sizeof body - k, "\nServices:\n");
+        for (int i = 0; i < info.nuuid && k < (int)sizeof body; i++)
+            k += snprintf(body + k, sizeof body - k, "  %s\n", info.uuid[i]);
+    }
+
+    newtWinMessage("Device", "OK", "%s", body);
+}
+
+/* Offered only when there is more than one adapter — the usual single-adapter
+ * machine must not be asked a question it has no choice about. */
+static void pick_adapter(bt_ctx *ctx) {
+    char paths[8][BT_PATH_LEN];
+    int n = bt_list_adapters(ctx, paths, 8);
+    if (n <= 1) return;
+
+    char *items[9];
+    for (int i = 0; i < n; i++) items[i] = paths[i];
+    items[n] = NULL;
+
+    int sel = 0;
+    if (newtWinMenu((char *)"Adapter", (char *)"Which adapter?",
+                    50, 5, 5, 6, items, &sel, (char *)"OK", (char *)"Cancel", NULL) == 1)
+        bt_select_adapter(ctx, paths[sel]);
+}
+
 int ui_run(bt_ctx *ctx) {
     newtInit();
     newtCls();
-    newtPushHelpLine(" Enter: connect/disconnect   Tab: move   F10/Esc/q: quit");
+    newtPushHelpLine(" Enter: connect  p: pair  t: trust  d: details  r: remove"
+                     "  s: scan  /: filter  q: quit");
     newtDrawRootText(0, 0, "blthtui — Bluetooth manager");
+
+    pick_adapter(ctx);
 
     /* Register the pairing agent now that newt can draw the prompts. */
     bt_agent_cb agent = {
@@ -240,7 +333,11 @@ int ui_run(bt_ctx *ctx) {
     newtFormSetTimer(form, REFRESH_MS);
     newtFormAddHotKey(form, NEWT_KEY_ESCAPE);
     newtFormAddHotKey(form, NEWT_KEY_F10);
-    newtFormAddHotKey(form, 'q');
+    /* Single-key actions: reaching a button through Tab is not what anyone
+     * expects from an nmtui-style list. */
+    static const int hotkeys[] = { 'q', 's', 'p', 't', 'd', 'r', 'o', '/' };
+    for (size_t i = 0; i < sizeof hotkeys / sizeof hotkeys[0]; i++)
+        newtFormAddHotKey(form, hotkeys[i]);
 
     /* Wake the form whenever BlueZ has something to say (device added/removed,
      * property changed, or an agent request), for live updates. */
@@ -248,9 +345,10 @@ int ui_run(bt_ctx *ctx) {
     if (busfd >= 0)
         newtFormWatchFd(form, busfd, NEWT_FD_READ);
 
-    bt_device devs[BT_MAX_DEVICES];
+    static bt_device devs[BT_MAX_DEVICES]; /* static: too big for the stack */
+    ui_view view = { .filter = "", .paired_only = false };
     int selected = 0;
-    int n = refresh(ctx, label, list, devs, selected);
+    int n = refresh(ctx, label, list, devs, selected, &view);
     long last_draw = now_ms();
     int  pending = 0; /* model changed, redraw owed */
 
@@ -264,18 +362,65 @@ int ui_run(bt_ctx *ctx) {
         bt_process(ctx);
         if (bt_take_dirty(ctx)) pending = 1;
 
+        /* An asynchronous action finished: report it once, then let the model
+         * updates that follow speak for themselves. */
+        char done[32] = "", doneerr[BT_ERR_LEN] = "";
+        if (bt_action_result(ctx, done, sizeof done, doneerr, sizeof doneerr)) {
+            pending = 1;
+            if (doneerr[0]) show_error(done, -EIO, doneerr);
+        }
+
         int cur = (int)(intptr_t)newtListboxGetCurrent(list);
         selected = cur;
         const bt_device *sel = (n > 0 && cur >= 0 && cur < n) ? &devs[cur] : NULL;
+        char bterr[BT_ERR_LEN] = "";
+        int r = 0;
 
         if (es.reason == NEWT_EXIT_HOTKEY) {
-            if (es.u.key == NEWT_KEY_ESCAPE || es.u.key == NEWT_KEY_F10 ||
-                es.u.key == 'q')
+            int key = es.u.key;
+            pending = 1;
+            if (key == NEWT_KEY_ESCAPE || key == NEWT_KEY_F10 || key == 'q') {
                 running = 0;
+            } else if (key == 's') {
+                r = bt_discovering(ctx) ? bt_stop_discovery(ctx, bterr, sizeof bterr)
+                                        : bt_start_discovery(ctx, bterr, sizeof bterr);
+                if (r < 0) show_error("Discovery", r, bterr);
+            } else if (key == 'o') {
+                view.paired_only = !view.paired_only;
+                selected = 0;
+            } else if (key == '/') {
+                char *val = NULL;
+                struct newtWinEntry items[] = {
+                    { (char *)"Name:", &val, 0 }, { NULL, NULL, 0 },
+                };
+                if (newtWinEntries((char *)"Filter", (char *)"Show devices matching:",
+                                   50, 5, 5, 20, items, (char *)"OK",
+                                   (char *)"Clear", NULL) == 1 && val)
+                    snprintf(view.filter, sizeof view.filter, "%s", val);
+                else
+                    view.filter[0] = '\0';
+                free(val);
+                selected = 0;
+            } else if (sel) {
+                if (key == 'p') {
+                    if ((r = bt_action_start(ctx, sel->path, BT_ACT_PAIR,
+                                             bterr, sizeof bterr)) < 0)
+                        show_error("Pair", r, bterr);
+                } else if (key == 't') {
+                    if ((r = bt_set_trusted(ctx, sel->path, !sel->trusted,
+                                            bterr, sizeof bterr)) < 0)
+                        show_error("Trust", r, bterr);
+                } else if (key == 'd') {
+                    show_details(ctx, sel);
+                } else if (key == 'r') {
+                    if (newtWinChoice("Remove device", "Remove", "Cancel",
+                                      "Remove %s (%s)?", sel->name, sel->address) == 1 &&
+                        (r = bt_remove(ctx, sel->path, bterr, sizeof bterr)) < 0)
+                        show_error("Remove", r, bterr);
+                }
+            }
         } else if (es.reason == NEWT_EXIT_COMPONENT) {
             newtComponent c = es.u.co;
-            char bterr[BT_ERR_LEN] = "";
-            int r = 0;
             pending = 1; /* whatever the user did, show the result */
             if (c == b_quit) {
                 running = 0;
@@ -287,7 +432,8 @@ int ui_run(bt_ctx *ctx) {
                                         : bt_start_discovery(ctx, bterr, sizeof bterr);
                 if (r < 0) show_error("Discovery", r, bterr);
             } else if (c == b_pair && sel) {
-                if ((r = bt_pair(ctx, sel->path, bterr, sizeof bterr)) < 0)
+                if ((r = bt_action_start(ctx, sel->path, BT_ACT_PAIR,
+                                         bterr, sizeof bterr)) < 0)
                     show_error("Pair", r, bterr);
             } else if (c == b_remove && sel) {
                 if (newtWinChoice("Remove device", "Remove", "Cancel",
@@ -296,8 +442,9 @@ int ui_run(bt_ctx *ctx) {
                         show_error("Remove", r, bterr);
                 }
             } else if (c == list && sel) {
-                r = sel->connected ? bt_disconnect(ctx, sel->path, bterr, sizeof bterr)
-                                   : bt_connect(ctx, sel->path, bterr, sizeof bterr);
+                r = bt_action_start(ctx, sel->path,
+                                    sel->connected ? BT_ACT_DISCONNECT : BT_ACT_CONNECT,
+                                    bterr, sizeof bterr);
                 if (r < 0) show_error(sel->connected ? "Disconnect" : "Connect", r, bterr);
             }
         }
@@ -310,7 +457,7 @@ int ui_run(bt_ctx *ctx) {
          * of waiting out the safety timer. */
         long t = now_ms();
         if (pending && t - last_draw >= MIN_REDRAW_MS) {
-            n = refresh(ctx, label, list, devs, selected);
+            n = refresh(ctx, label, list, devs, selected, &view);
             last_draw = t;
             pending = 0;
             newtFormSetTimer(form, REFRESH_MS);

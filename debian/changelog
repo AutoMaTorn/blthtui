@@ -1,3 +1,25 @@
+blthtui (0.2.0) unstable; urgency=medium
+
+  * Truncate device names by character instead of by byte, so non-ASCII names
+    no longer render as garbage; non-printing characters are replaced rather
+    than passed to the terminal.
+  * Run Connect, Disconnect and Pair asynchronously. A blocking call could not
+    answer our own pairing agent, so an outgoing pairing had no way to complete.
+  * Show BlueZ's own error text instead of the errno string.
+  * Update the device model from BlueZ signals rather than re-enumerating every
+    object on each one: a 12s scan with 109 devices now issues one
+    GetManagedObjects instead of roughly 480 round-trips.
+  * Sort only on structural changes, so RSSI updates stop shuffling rows under
+    the cursor; coalesce redraws to at most ten a second.
+  * Add single-key actions (p pair, t trust, d details, r remove, s scan,
+    / filter, o paired-only), a device details window with battery level and
+    services, and an adapter picker when more than one adapter is present.
+  * Detect the adapter disappearing at runtime and re-acquire it.
+  * Unregister the pairing agent and stop discovery on exit.
+  * Raise the device limit to 256 and say so when the list is full.
+
+ -- Torn <automatorn@gmail.com>  Fri, 24 Jul 2026 06:56:06 +0300
+
 blthtui (0.1.0) unstable; urgency=medium
 
   * Initial release: adapter toggle, scan, connect/disconnect, pair/remove,

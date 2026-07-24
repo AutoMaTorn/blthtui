@@ -46,6 +46,14 @@ struct bt_ctx {
     bool    powered;
     bool    discovering;
 
+    /* At most one asynchronous device action in flight. */
+    sd_bus_slot *op_slot;
+    const char *op_label;         /* "Connecting" etc., NULL when idle */
+    char    op_err[BT_ERR_LEN];
+    bool    op_done;              /* reply arrived, result not yet collected */
+
+    bool    we_started_discovery; /* only stop what we started */
+
     bt_agent_cb agent;
     bool    agent_set;
     sd_bus_slot *agent_slot;      /* owns the exported Agent1 object */
@@ -461,6 +469,15 @@ bt_ctx *bt_open(const char **err) {
 void bt_close(bt_ctx *ctx) {
     if (!ctx) return;
 
+    /* Leaving discovery running drains the battery of every machine that ever
+     * quits this program. Stop only what we started: BlueZ refcounts discovery
+     * per client, and another one's session is not ours to end. */
+    if (ctx->we_started_discovery && ctx->adapter[0] != '\0') {
+        char err[BT_ERR_LEN] = "";
+        bt_stop_discovery(ctx, err, sizeof err);
+    }
+    if (ctx->op_slot) ctx->op_slot = sd_bus_slot_unref(ctx->op_slot);
+
     /* Hand the agent back before dropping the bus, so BlueZ sees a clean
      * withdrawal rather than our name simply vanishing. */
     if (ctx->agent_registered) {
@@ -505,10 +522,14 @@ static int adapter_method(bt_ctx *ctx, const char *method, char *errbuf, size_t 
 }
 
 int bt_start_discovery(bt_ctx *ctx, char *err, size_t errsz) {
-    return adapter_method(ctx, "StartDiscovery", err, errsz);
+    int r = adapter_method(ctx, "StartDiscovery", err, errsz);
+    if (r >= 0) ctx->we_started_discovery = true;
+    return r;
 }
 int bt_stop_discovery(bt_ctx *ctx, char *err, size_t errsz) {
-    return adapter_method(ctx, "StopDiscovery", err, errsz);
+    int r = adapter_method(ctx, "StopDiscovery", err, errsz);
+    if (r >= 0) ctx->we_started_discovery = false;
+    return r;
 }
 
 /* Sort key: connected first, then paired, then the rest. */
@@ -530,6 +551,91 @@ static int dev_cmp(const void *a, const void *b) {
     return strcmp(x->name, y->name); /* alphabetical fallback within a group */
 }
 
+/* Extra detail the list has no room for. Fetched on demand — a details window
+ * is opened rarely, so these round-trips never touch the hot path. */
+int bt_device_info(bt_ctx *ctx, const char *path, bt_devinfo *out) {
+    memset(out, 0, sizeof *out);
+
+    sd_bus_error err = SD_BUS_ERROR_NULL;
+    uint8_t pct = 0;
+    /* Battery1 is present only on devices that report a level. */
+    if (sd_bus_get_property_trivial(ctx->bus, BLUEZ_SVC, path,
+                                    "org.bluez.Battery1", "Percentage",
+                                    &err, 'y', &pct) >= 0) {
+        out->has_battery = true;
+        out->battery = pct;
+    }
+    sd_bus_error_free(&err);
+
+    err = (sd_bus_error)SD_BUS_ERROR_NULL;
+    char *icon = NULL;
+    if (sd_bus_get_property_string(ctx->bus, BLUEZ_SVC, path, DEVICE_IFACE,
+                                   "Icon", &err, &icon) >= 0 && icon)
+        snprintf(out->icon, sizeof out->icon, "%s", icon);
+    free(icon);
+    sd_bus_error_free(&err);
+
+    err = (sd_bus_error)SD_BUS_ERROR_NULL;
+    sd_bus_message *m = NULL;
+    int r = sd_bus_get_property(ctx->bus, BLUEZ_SVC, path, DEVICE_IFACE,
+                                "UUIDs", &err, &m, "as");
+    if (r >= 0) {
+        if (sd_bus_message_enter_container(m, 'a', "s") >= 0) {
+            const char *u = NULL;
+            while (out->nuuid < (int)(sizeof out->uuid / sizeof out->uuid[0]) &&
+                   sd_bus_message_read_basic(m, 's', &u) > 0)
+                snprintf(out->uuid[out->nuuid++], sizeof out->uuid[0], "%s", u);
+            sd_bus_message_exit_container(m);
+        }
+        sd_bus_message_unref(m);
+    }
+    sd_bus_error_free(&err);
+    return 0;
+}
+
+/* ---- adapters ---- */
+
+int bt_list_adapters(bt_ctx *ctx, char paths[][BT_PATH_LEN], int max) {
+    sd_bus_error err = SD_BUS_ERROR_NULL;
+    sd_bus_message *m = NULL;
+    int n = 0;
+
+    int r = sd_bus_call_method(ctx->bus, BLUEZ_SVC, "/",
+                               "org.freedesktop.DBus.ObjectManager",
+                               "GetManagedObjects", &err, &m, "");
+    if (r < 0) goto done;
+    if ((r = sd_bus_message_enter_container(m, 'a', "{oa{sa{sv}}}")) < 0) goto done;
+
+    while (n < max && sd_bus_message_enter_container(m, 'e', "oa{sa{sv}}") > 0) {
+        const char *opath = NULL;
+        if (sd_bus_message_read_basic(m, 'o', &opath) < 0) break;
+        if (sd_bus_message_enter_container(m, 'a', "{sa{sv}}") < 0) break;
+
+        while (sd_bus_message_enter_container(m, 'e', "sa{sv}") > 0) {
+            const char *iface = NULL;
+            if (sd_bus_message_read_basic(m, 's', &iface) < 0) break;
+            if (strcmp(iface, ADAPTER_IFACE) == 0 && n < max)
+                snprintf(paths[n++], BT_PATH_LEN, "%s", opath);
+            sd_bus_message_skip(m, "a{sv}");
+            sd_bus_message_exit_container(m);
+        }
+        sd_bus_message_exit_container(m);
+        sd_bus_message_exit_container(m);
+    }
+
+done:
+    sd_bus_message_unref(m);
+    sd_bus_error_free(&err);
+    return r < 0 ? r : n;
+}
+
+int bt_select_adapter(bt_ctx *ctx, const char *path) {
+    snprintf(ctx->adapter, sizeof ctx->adapter, "%s", path);
+    ctx->ndev = 0;
+    log_msg("adapter selected: %s", path);
+    return bt_sync(ctx) < 0 ? -ENODEV : 0;
+}
+
 int bt_devices(bt_ctx *ctx, const bt_device **out) {
     /* Re-sort only when the order can have changed. Doing it on every read
      * would undo the point: RSSI updates arrive constantly during a scan and
@@ -542,11 +648,45 @@ int bt_devices(bt_ctx *ctx, const bt_device **out) {
     return ctx->ndev;
 }
 
-/* One Device1 method call. `timeout_usec` of 0 means sd-bus's default (25s);
- * pass something generous for calls that wait on a human. */
-static int device_method(bt_ctx *ctx, const char *path, const char *method,
-                         uint64_t timeout_usec, char *errbuf, size_t errsz) {
-    sd_bus_error err = SD_BUS_ERROR_NULL;
+bool bt_truncated(const bt_ctx *ctx) { return ctx->ndev >= BT_MAX_DEVICES; }
+
+/* ---- asynchronous device actions ---- */
+
+static int on_action_reply(sd_bus_message *m, void *userdata, sd_bus_error *e) {
+    bt_ctx *ctx = userdata;
+    (void)e;
+
+    const sd_bus_error *rep = sd_bus_message_get_error(m);
+    if (rep) {
+        set_err(ctx->op_err, sizeof ctx->op_err, rep, sd_bus_message_get_errno(m));
+        log_msg("action %s failed: %s", ctx->op_label ? ctx->op_label : "?",
+                ctx->op_err);
+    } else {
+        ctx->op_err[0] = '\0';
+        log_msg("action %s ok", ctx->op_label ? ctx->op_label : "?");
+    }
+
+    ctx->op_done = true;   /* the slot is released in bt_process */
+    ctx->dirty = 1;
+    return 0;
+}
+
+int bt_action_start(bt_ctx *ctx, const char *path, bt_action act,
+                    char *errbuf, size_t errsz) {
+    if (ctx->op_label) {
+        set_err(errbuf, errsz, NULL, -EBUSY);
+        return -EBUSY;
+    }
+
+    const char *method, *label;
+    uint64_t timeout = 0;
+    switch (act) {
+    case BT_ACT_CONNECT:    method = "Connect";    label = "Connecting";    break;
+    case BT_ACT_DISCONNECT: method = "Disconnect"; label = "Disconnecting"; break;
+    default:                method = "Pair";       label = "Pairing";
+                            timeout = PAIR_TIMEOUT_USEC;                    break;
+    }
+
     sd_bus_message *req = NULL;
     int r = sd_bus_message_new_method_call(ctx->bus, &req, BLUEZ_SVC, path,
                                            DEVICE_IFACE, method);
@@ -555,24 +695,44 @@ static int device_method(bt_ctx *ctx, const char *path, const char *method,
         return r;
     }
 
-    r = sd_bus_call(ctx->bus, req, timeout_usec, &err, NULL);
-    log_msg("device.%s %s -> %d%s%s", method, path, r,
+    r = sd_bus_call_async(ctx->bus, &ctx->op_slot, req, on_action_reply, ctx, timeout);
+    sd_bus_message_unref(req);
+    if (r < 0) {
+        set_err(errbuf, errsz, NULL, r);
+        return r;
+    }
+
+    ctx->op_label = label;
+    ctx->op_done = false;
+    ctx->op_err[0] = '\0';
+    log_msg("action %s %s started", label, path);
+    return 0;
+}
+
+const char *bt_action_active(const bt_ctx *ctx) { return ctx->op_label; }
+
+bool bt_action_result(bt_ctx *ctx, char *label, size_t labelsz,
+                      char *err, size_t errsz) {
+    if (!ctx->op_done) return false;
+
+    if (label && labelsz) snprintf(label, labelsz, "%s", ctx->op_label ? ctx->op_label : "");
+    if (err && errsz)     snprintf(err, errsz, "%s", ctx->op_err);
+
+    ctx->op_done = false;
+    ctx->op_label = NULL;
+    return true;
+}
+
+int bt_set_trusted(bt_ctx *ctx, const char *path, bool on,
+                   char *errbuf, size_t errsz) {
+    sd_bus_error err = SD_BUS_ERROR_NULL;
+    int r = sd_bus_set_property(ctx->bus, BLUEZ_SVC, path, DEVICE_IFACE,
+                                "Trusted", &err, "b", (int)on);
+    log_msg("device.Trusted=%d %s -> %d%s%s", on, path, r,
             r < 0 && err.message ? " " : "", r < 0 && err.message ? err.message : "");
     if (r < 0) set_err(errbuf, errsz, &err, r);
-
-    sd_bus_message_unref(req);
     sd_bus_error_free(&err);
     return r < 0 ? r : 0;
-}
-
-int bt_connect(bt_ctx *ctx, const char *path, char *err, size_t errsz) {
-    return device_method(ctx, path, "Connect", 0, err, errsz);
-}
-int bt_disconnect(bt_ctx *ctx, const char *path, char *err, size_t errsz) {
-    return device_method(ctx, path, "Disconnect", 0, err, errsz);
-}
-int bt_pair(bt_ctx *ctx, const char *path, char *err, size_t errsz) {
-    return device_method(ctx, path, "Pair", PAIR_TIMEOUT_USEC, err, errsz);
 }
 
 int bt_remove(bt_ctx *ctx, const char *path, char *errbuf, size_t errsz) {
@@ -594,6 +754,11 @@ int bt_process(bt_ctx *ctx) {
      * applied to the model by its handler, so this is the whole update path. */
     while ((r = sd_bus_process(ctx->bus, NULL)) > 0)
         n++;
+
+    /* Release a finished action's slot here rather than inside its own
+     * callback, where sd-bus still owns it. */
+    if (ctx->op_done && ctx->op_slot)
+        ctx->op_slot = sd_bus_slot_unref(ctx->op_slot);
 
     /* Two ways the model can drift: a signal named something we never saw, or
      * a lost message. Both are rare, and a resync is one round-trip. */

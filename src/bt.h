@@ -55,21 +55,60 @@ bool bt_discovering(const bt_ctx *ctx);
  * bt_process() — and re-sorts it only when the order can actually have
  * changed. An RSSI update alone never reorders the list, so rows do not slide
  * out from under the cursor while a scan is running. */
-#define BT_MAX_DEVICES 128
+/* A busy café easily shows 100+ devices; 128 was close enough to the ceiling
+ * to hit it, and overflow used to be silent. */
+#define BT_MAX_DEVICES 256
 
 int bt_devices(bt_ctx *ctx, const bt_device **out);
+
+/* True when the model is full, so BlueZ may know devices we are not showing.
+ * Overflow used to be silent; the UI says so now. */
+bool bt_truncated(const bt_ctx *ctx);
 
 /* Force a full re-read of the model. Only needed after something that
  * bypasses signals; ordinary use never has to call it. */
 int bt_sync(bt_ctx *ctx);
 
-/* Per-device actions. `path` is bt_device.path; `err` as described above.
- * bt_pair runs with a long timeout, since BlueZ only answers once the whole
- * pairing exchange — including our agent's dialogs — has finished. */
-int bt_connect(bt_ctx *ctx, const char *path, char *err, size_t errsz);
-int bt_disconnect(bt_ctx *ctx, const char *path, char *err, size_t errsz);
-int bt_pair(bt_ctx *ctx, const char *path, char *err, size_t errsz);
 int bt_remove(bt_ctx *ctx, const char *path, char *err, size_t errsz);
+int bt_set_trusted(bt_ctx *ctx, const char *path, bool on, char *err, size_t errsz);
+
+/* ---- asynchronous device actions ----
+ *
+ * Connect and Pair take seconds, and Pair is worse than slow: BlueZ answers it
+ * only after our own agent has replied to whatever it asked. A blocking call
+ * cannot do that — sd_bus_call queues incoming messages instead of dispatching
+ * them, so the agent request would sit unanswered until the call timed out.
+ * Running the call asynchronously keeps the event loop alive, which is what
+ * lets the agent (and the UI) respond at all.
+ *
+ * One action at a time; starting another while one is in flight returns
+ * -EBUSY. */
+typedef enum { BT_ACT_CONNECT, BT_ACT_DISCONNECT, BT_ACT_PAIR } bt_action;
+
+int bt_action_start(bt_ctx *ctx, const char *path, bt_action act,
+                    char *err, size_t errsz);
+
+/* Human-readable label of the action in flight ("Connecting"), or NULL. */
+const char *bt_action_active(const bt_ctx *ctx);
+
+/* True exactly once per finished action. `err` is empty on success. */
+bool bt_action_result(bt_ctx *ctx, char *label, size_t labelsz,
+                      char *err, size_t errsz);
+
+/* ---- extra per-device detail, fetched on demand ---- */
+typedef struct {
+    bool has_battery;
+    int  battery;              /* 0..100, valid when has_battery */
+    char icon[32];             /* "audio-headset" and friends, "" if unknown */
+    int  nuuid;
+    char uuid[8][40];          /* first few service UUIDs */
+} bt_devinfo;
+
+int bt_device_info(bt_ctx *ctx, const char *path, bt_devinfo *out);
+
+/* ---- adapters ---- */
+int bt_list_adapters(bt_ctx *ctx, char paths[][BT_PATH_LEN], int max);
+int bt_select_adapter(bt_ctx *ctx, const char *path);
 
 /* File descriptor to poll for incoming BlueZ signals. */
 int bt_get_fd(bt_ctx *ctx);
