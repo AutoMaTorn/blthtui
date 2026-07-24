@@ -73,22 +73,6 @@ the debug symbols, split out of the binary by `dh_strip` and matched to it by
 Build-ID. It is not needed to run blthtui — install it alongside the main package
 when you want a readable backtrace out of `gdb` or a core dump.
 
-### Hosting your own apt repository
-
-To let machines `apt install blthtui` from a URL, publish the `.deb` with a
-tool like `reprepro` or `aptly` on a web server, sign it with a GPG key, and on
-each client:
-
-```sh
-echo "deb [signed-by=/usr/share/keyrings/blthtui.gpg] https://you.example/apt ./" \
-    | sudo tee /etc/apt/sources.list.d/blthtui.list
-sudo apt update && sudo apt install blthtui
-```
-
-For Ubuntu specifically, a Launchpad **PPA** builds the `.deb` from source for
-users. Getting into the official Debian archive requires an ITP bug and a
-sponsoring maintainer.
-
 ## Debugging
 
 **Log mode.** Set `BLTHTUI_LOG` to a file path to record every D-Bus call,
