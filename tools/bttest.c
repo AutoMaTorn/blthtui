@@ -24,15 +24,14 @@ int main(void) {
     }
 
     printf("adapter: %s\n", bt_adapter_path(c));
+    printf("powered: %s   discovering: %s   live updates: %s\n",
+           bt_powered(c) ? "yes" : "no",
+           bt_discovering(c) ? "yes" : "no",
+           bt_live_updates(c) ? "yes" : "no");
 
-    bool powered = false, discovering = false;
-    bt_get_powered(c, &powered);
-    bt_get_discovering(c, &discovering);
-    printf("powered: %s   discovering: %s\n",
-           powered ? "yes" : "no", discovering ? "yes" : "no");
-
-    bt_device devs[64];
-    int n = bt_list_devices(c, devs, 64);
+    /* bt_open() has already populated the model; no extra round-trip here. */
+    const bt_device *devs = NULL;
+    int n = bt_devices(c, &devs);
     printf("devices: %d\n", n);
     for (int i = 0; i < n; i++) {
         printf("  [%c%c] %-17s  %s",

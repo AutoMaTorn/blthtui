@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L /* clock_gettime under -std=c11 */
+
 #include "bt.h"
 #include "log.h"
 
@@ -7,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <systemd/sd-bus.h>
+#include <time.h>
 
 #define BLUEZ_SVC     "org.bluez"
 #define ADAPTER_IFACE "org.bluez.Adapter1"
@@ -21,16 +24,68 @@
  * defaults to 25s, which a distracted user blows through easily. */
 #define PAIR_TIMEOUT_USEC (180 * 1000000ULL)
 
+/* Signals keep the model exact, so this only has to cover the gap where one is
+ * genuinely lost (a bus hiccup, a bluetoothd restart). Once a minute is
+ * invisible next to the dozens of updates a second an active scan produces. */
+#define RESYNC_MS 60000
+
 struct bt_ctx {
     sd_bus *bus;
     char    adapter[BT_PATH_LEN]; /* e.g. "/org/bluez/hci0", "" once gone */
-    int     dirty;                /* set by signal callbacks     */
+    int     dirty;                /* model changed; UI should redraw */
     bool    live;                 /* signal subscriptions are in place */
+
+    /* The device model, owned here and updated in place from signals. */
+    bt_device devs[BT_MAX_DEVICES];
+    int     ndev;
+    bool    need_sort;            /* order may have changed, not just values */
+    bool    need_resync;          /* a signal referred to something unknown */
+    long    last_sync_ms;
+
+    /* Adapter properties, mirrored from PropertiesChanged. */
+    bool    powered;
+    bool    discovering;
+
     bt_agent_cb agent;
     bool    agent_set;
     sd_bus_slot *agent_slot;      /* owns the exported Agent1 object */
     bool    agent_registered;     /* BlueZ accepted RegisterAgent */
 };
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* ---- model helpers ---- */
+
+static bt_device *find_dev(bt_ctx *c, const char *path) {
+    for (int i = 0; i < c->ndev; i++)
+        if (strcmp(c->devs[i].path, path) == 0) return &c->devs[i];
+    return NULL;
+}
+
+static bt_device *add_dev(bt_ctx *c, const char *path) {
+    if (c->ndev >= BT_MAX_DEVICES) return NULL;
+    bt_device *d = &c->devs[c->ndev++];
+    memset(d, 0, sizeof *d);
+    snprintf(d->path, sizeof d->path, "%s", path);
+    c->need_sort = true;
+    return d;
+}
+
+static void drop_dev(bt_ctx *c, const char *path) {
+    for (int i = 0; i < c->ndev; i++) {
+        if (strcmp(c->devs[i].path, path) != 0) continue;
+        if (i + 1 < c->ndev)
+            memmove(&c->devs[i], &c->devs[i + 1],
+                    (size_t)(c->ndev - i - 1) * sizeof c->devs[0]);
+        c->ndev--;
+        c->need_sort = true;
+        return;
+    }
+}
 
 /* Copy BlueZ's own error text into the caller's buffer, falling back to the
  * errno string. `e` may be an unset sd_bus_error. */
@@ -72,12 +127,17 @@ static int read_var_int16(sd_bus_message *m, short *out) {
     return sd_bus_message_exit_container(m);
 }
 
-/* Parse an a{sv} property dict for a Device1 object into `d`. */
-static int parse_device_props(sd_bus_message *m, bt_device *d) {
+/* Parse an a{sv} property dict for a Device1 object into `d`.
+ *
+ * `partial` marks a PropertiesChanged payload, which carries only the keys
+ * that actually changed. There the Address->name fallback must not fire: an
+ * update mentioning Address but not Alias would otherwise overwrite a
+ * perfectly good name with the MAC. */
+static int parse_device_props(sd_bus_message *m, bt_device *d, bool partial) {
     int r = sd_bus_message_enter_container(m, 'a', "{sv}");
     if (r < 0) return r;
 
-    bool have_alias = false;
+    bool have_alias = partial;
     while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0) {
         const char *key = NULL;
         if ((r = sd_bus_message_read_basic(m, 's', &key)) < 0) return r;
@@ -105,6 +165,29 @@ static int parse_device_props(sd_bus_message *m, bt_device *d) {
         } else if (strcmp(key, "RSSI") == 0) {
             if ((r = read_var_int16(m, &d->rssi)) < 0) return r;
             d->has_rssi = true;
+        } else {
+            if ((r = sd_bus_message_skip(m, "v")) < 0) return r;
+        }
+
+        if ((r = sd_bus_message_exit_container(m)) < 0) return r; /* sv */
+    }
+    if (r < 0) return r;
+    return sd_bus_message_exit_container(m); /* a{sv} */
+}
+
+/* Same, for the two Adapter1 properties the UI shows. */
+static int parse_adapter_props(sd_bus_message *m, bt_ctx *c) {
+    int r = sd_bus_message_enter_container(m, 'a', "{sv}");
+    if (r < 0) return r;
+
+    while ((r = sd_bus_message_enter_container(m, 'e', "sv")) > 0) {
+        const char *key = NULL;
+        if ((r = sd_bus_message_read_basic(m, 's', &key)) < 0) return r;
+
+        if (strcmp(key, "Powered") == 0) {
+            if ((r = read_var_bool(m, &c->powered)) < 0) return r;
+        } else if (strcmp(key, "Discovering") == 0) {
+            if ((r = read_var_bool(m, &c->discovering)) < 0) return r;
         } else {
             if ((r = sd_bus_message_skip(m, "v")) < 0) return r;
         }
@@ -151,7 +234,7 @@ static int walk_objects(sd_bus *bus,
                 bt_device *d = &devs[*ndev];
                 memset(d, 0, sizeof *d);
                 snprintf(d->path, sizeof d->path, "%s", opath);
-                if ((r = parse_device_props(m, d)) < 0) goto done;
+                if ((r = parse_device_props(m, d, false)) < 0) goto done;
                 (*ndev)++;
             } else if (adapter_out && strcmp(iface, ADAPTER_IFACE) == 0) {
                 if (adapter_out[0] == '\0')
@@ -176,10 +259,81 @@ done:
 
 /* ---- public API ---- */
 
-/* Any BlueZ signal we subscribed to: mark the model dirty for a refresh. */
-static int on_bt_signal(sd_bus_message *m, void *userdata, sd_bus_error *e) {
-    (void)m; (void)e;
-    ((bt_ctx *)userdata)->dirty = 1;
+/* InterfacesAdded carries "oa{sa{sv}}" — the new object with the full property
+ * set of each interface it gained. That is exactly the shape parse_device_props
+ * reads, so a new device costs no follow-up call: the signal itself is the
+ * data. */
+static int on_interfaces_added(sd_bus_message *m, void *userdata, sd_bus_error *e) {
+    bt_ctx *ctx = userdata;
+    (void)e;
+
+    const char *path = NULL;
+    if (sd_bus_message_read_basic(m, 'o', &path) < 0 || !path) return 0;
+    if (sd_bus_message_enter_container(m, 'a', "{sa{sv}}") < 0) return 0;
+
+    while (sd_bus_message_enter_container(m, 'e', "sa{sv}") > 0) {
+        const char *iface = NULL;
+        if (sd_bus_message_read_basic(m, 's', &iface) < 0) break;
+
+        if (strcmp(iface, DEVICE_IFACE) == 0) {
+            bt_device *d = find_dev(ctx, path);
+            if (!d) d = add_dev(ctx, path);
+            if (d) {
+                parse_device_props(m, d, false);
+                ctx->dirty = 1;
+            } else {
+                sd_bus_message_skip(m, "a{sv}"); /* model full */
+            }
+        } else if (strcmp(iface, ADAPTER_IFACE) == 0) {
+            if (ctx->adapter[0] == '\0') {
+                snprintf(ctx->adapter, sizeof ctx->adapter, "%s", path);
+                log_msg("adapter appeared: %s", ctx->adapter);
+                ctx->need_resync = true; /* pick up its devices and state */
+                ctx->dirty = 1;
+            }
+            sd_bus_message_skip(m, "a{sv}");
+        } else {
+            sd_bus_message_skip(m, "a{sv}");
+        }
+
+        if (sd_bus_message_exit_container(m) < 0) break; /* sa{sv} */
+    }
+    sd_bus_message_exit_container(m);
+    return 0;
+}
+
+/* PropertiesChanged carries "sa{sv}as" and, crucially, only the keys that
+ * changed — during a scan that is usually a lone RSSI. Applying it in place is
+ * what removes the full re-enumeration from the hot path. */
+static int on_properties_changed(sd_bus_message *m, void *userdata, sd_bus_error *e) {
+    bt_ctx *ctx = userdata;
+    (void)e;
+
+    const char *path = sd_bus_message_get_path(m);
+    const char *iface = NULL;
+    if (!path || sd_bus_message_read_basic(m, 's', &iface) < 0 || !iface) return 0;
+
+    if (strcmp(iface, DEVICE_IFACE) == 0) {
+        bt_device *d = find_dev(ctx, path);
+        if (!d) {
+            /* A device we never saw appear: our model has a gap. */
+            ctx->need_resync = true;
+            ctx->dirty = 1;
+            return 0;
+        }
+        bool was_connected = d->connected, was_paired = d->paired;
+        if (parse_device_props(m, d, true) >= 0) {
+            /* Only these two move a row between groups. An RSSI change must
+             * not reorder the list — rows would slide under the cursor. */
+            if (d->connected != was_connected || d->paired != was_paired)
+                ctx->need_sort = true;
+            ctx->dirty = 1;
+        }
+    } else if (strcmp(iface, ADAPTER_IFACE) == 0 &&
+               ctx->adapter[0] != '\0' && strcmp(path, ctx->adapter) == 0) {
+        if (parse_adapter_props(m, ctx) >= 0)
+            ctx->dirty = 1;
+    }
     return 0;
 }
 
@@ -195,17 +349,20 @@ static int on_interfaces_removed(sd_bus_message *m, void *userdata, sd_bus_error
     const char *path = NULL;
     if (sd_bus_message_read_basic(m, 'o', &path) < 0 || !path)
         return 0;
-    if (ctx->adapter[0] == '\0' || strcmp(path, ctx->adapter) != 0)
-        return 0;
+
+    bool is_adapter = ctx->adapter[0] != '\0' && strcmp(path, ctx->adapter) == 0;
 
     if (sd_bus_message_enter_container(m, 'a', "s") < 0)
         return 0;
     const char *iface = NULL;
     while (sd_bus_message_read_basic(m, 's', &iface) > 0) {
-        if (strcmp(iface, ADAPTER_IFACE) == 0) {
+        if (is_adapter && strcmp(iface, ADAPTER_IFACE) == 0) {
             log_msg("adapter %s went away", ctx->adapter);
             ctx->adapter[0] = '\0';
-            break;
+            ctx->ndev = 0;      /* its devices went with it */
+            ctx->powered = ctx->discovering = false;
+        } else if (strcmp(iface, DEVICE_IFACE) == 0) {
+            drop_dev(ctx, path);
         }
     }
     sd_bus_message_exit_container(m);
@@ -219,10 +376,47 @@ int bt_ensure_adapter(bt_ctx *ctx) {
     if (r < 0 || ctx->adapter[0] == '\0') return -ENODEV;
 
     log_msg("adapter reacquired: %s", ctx->adapter);
+    bt_sync(ctx);
     return 0;
 }
 
 bool bt_live_updates(const bt_ctx *ctx) { return ctx->live; }
+
+/* Read the adapter's two properties. Only used by bt_sync — from then on
+ * PropertiesChanged keeps them current for free. */
+static void sync_adapter_props(bt_ctx *c) {
+    sd_bus_error err = SD_BUS_ERROR_NULL;
+    int v = 0;
+
+    if (sd_bus_get_property_trivial(c->bus, BLUEZ_SVC, c->adapter, ADAPTER_IFACE,
+                                    "Powered", &err, 'b', &v) >= 0)
+        c->powered = v ? true : false;
+    sd_bus_error_free(&err);
+
+    err = (sd_bus_error)SD_BUS_ERROR_NULL;
+    if (sd_bus_get_property_trivial(c->bus, BLUEZ_SVC, c->adapter, ADAPTER_IFACE,
+                                    "Discovering", &err, 'b', &v) >= 0)
+        c->discovering = v ? true : false;
+    sd_bus_error_free(&err);
+}
+
+int bt_sync(bt_ctx *ctx) {
+    if (ctx->adapter[0] == '\0') return -ENODEV;
+
+    int n = 0;
+    int r = walk_objects(ctx->bus, ctx->devs, BT_MAX_DEVICES, &n, NULL, 0);
+    if (r < 0) return r;
+
+    ctx->ndev = n;
+    ctx->need_sort = true;
+    ctx->need_resync = false;
+    ctx->last_sync_ms = now_ms();
+    sync_adapter_props(ctx);
+    ctx->dirty = 1;
+    log_msg("sync: %d devices, powered=%d discovering=%d",
+            n, ctx->powered, ctx->discovering);
+    return n;
+}
 
 bt_ctx *bt_open(const char **err) {
     bt_ctx *c = calloc(1, sizeof *c);
@@ -235,6 +429,23 @@ bt_ctx *bt_open(const char **err) {
         return NULL;
     }
 
+    /* Subscribe BEFORE the initial enumeration. The other order leaves a
+     * window in which a device appearing between the two is missed entirely,
+     * and the model would carry that gap until the next safety resync. */
+    int m1 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
+                                 "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
+                                 on_interfaces_added, c);
+    int m2 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
+                                 "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
+                                 on_interfaces_removed, c);
+    int m3 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
+                                 "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                 on_properties_changed, c);
+    c->live = (m1 >= 0 && m2 >= 0 && m3 >= 0);
+    if (!c->live)
+        log_msg("signal subscriptions failed (%d/%d/%d) — falling back to the timer",
+                m1, m2, m3);
+
     r = walk_objects(c->bus, NULL, 0, NULL, c->adapter, sizeof c->adapter);
     if (r < 0 || c->adapter[0] == '\0') {
         if (err) *err = "no Bluetooth adapter found (is bluetoothd running?)";
@@ -243,23 +454,7 @@ bt_ctx *bt_open(const char **err) {
     }
     log_msg("bt_open: adapter %s", c->adapter);
 
-    /* Live updates: any of these signals means the device list may have
-     * changed. The callback just raises a flag the UI polls via bt_take_dirty.
-     * A failed subscription is not fatal — the UI still has its timer — but it
-     * must not pass silently, so track it and let the UI say so. */
-    int m1 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
-                                 "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
-                                 on_bt_signal, c);
-    int m2 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
-                                 "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
-                                 on_interfaces_removed, c);
-    int m3 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
-                                 "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                                 on_bt_signal, c);
-    c->live = (m1 >= 0 && m2 >= 0 && m3 >= 0);
-    if (!c->live)
-        log_msg("signal subscriptions failed (%d/%d/%d) — falling back to the timer",
-                m1, m2, m3);
+    bt_sync(c);
     return c;
 }
 
@@ -284,16 +479,8 @@ void bt_close(bt_ctx *ctx) {
 
 const char *bt_adapter_path(const bt_ctx *ctx) { return ctx->adapter; }
 
-int bt_get_powered(bt_ctx *ctx, bool *out) {
-    sd_bus_error err = SD_BUS_ERROR_NULL;
-    int v = 0;
-    int r = sd_bus_get_property_trivial(ctx->bus, BLUEZ_SVC, ctx->adapter,
-                                        ADAPTER_IFACE, "Powered", &err, 'b', &v);
-    sd_bus_error_free(&err);
-    if (r < 0) return r;
-    *out = v ? true : false;
-    return 0;
-}
+bool bt_powered(const bt_ctx *ctx)     { return ctx->powered; }
+bool bt_discovering(const bt_ctx *ctx) { return ctx->discovering; }
 
 int bt_set_powered(bt_ctx *ctx, bool on, char *errbuf, size_t errsz) {
     sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -304,17 +491,6 @@ int bt_set_powered(bt_ctx *ctx, bool on, char *errbuf, size_t errsz) {
     if (r < 0) set_err(errbuf, errsz, &err, r);
     sd_bus_error_free(&err);
     return r < 0 ? r : 0;
-}
-
-int bt_get_discovering(bt_ctx *ctx, bool *out) {
-    sd_bus_error err = SD_BUS_ERROR_NULL;
-    int v = 0;
-    int r = sd_bus_get_property_trivial(ctx->bus, BLUEZ_SVC, ctx->adapter,
-                                        ADAPTER_IFACE, "Discovering", &err, 'b', &v);
-    sd_bus_error_free(&err);
-    if (r < 0) return r;
-    *out = v ? true : false;
-    return 0;
 }
 
 static int adapter_method(bt_ctx *ctx, const char *method, char *errbuf, size_t errsz) {
@@ -354,12 +530,16 @@ static int dev_cmp(const void *a, const void *b) {
     return strcmp(x->name, y->name); /* alphabetical fallback within a group */
 }
 
-int bt_list_devices(bt_ctx *ctx, bt_device *out, size_t max) {
-    int n = 0;
-    int r = walk_objects(ctx->bus, out, max, &n, NULL, 0);
-    if (r < 0) return r;
-    if (n > 1) qsort(out, (size_t)n, sizeof *out, dev_cmp);
-    return n;
+int bt_devices(bt_ctx *ctx, const bt_device **out) {
+    /* Re-sort only when the order can have changed. Doing it on every read
+     * would undo the point: RSSI updates arrive constantly during a scan and
+     * would shuffle rows under the user's cursor. */
+    if (ctx->need_sort && ctx->ndev > 1) {
+        qsort(ctx->devs, (size_t)ctx->ndev, sizeof ctx->devs[0], dev_cmp);
+        ctx->need_sort = false;
+    }
+    if (out) *out = ctx->devs;
+    return ctx->ndev;
 }
 
 /* One Device1 method call. `timeout_usec` of 0 means sd-bus's default (25s);
@@ -410,9 +590,17 @@ int bt_get_fd(bt_ctx *ctx) { return sd_bus_get_fd(ctx->bus); }
 
 int bt_process(bt_ctx *ctx) {
     int r, n = 0;
-    /* Drain fully: each call handles at most one message. */
+    /* Drain fully: each call handles at most one message. Every signal is
+     * applied to the model by its handler, so this is the whole update path. */
     while ((r = sd_bus_process(ctx->bus, NULL)) > 0)
         n++;
+
+    /* Two ways the model can drift: a signal named something we never saw, or
+     * a lost message. Both are rare, and a resync is one round-trip. */
+    if (ctx->adapter[0] != '\0' &&
+        (ctx->need_resync || now_ms() - ctx->last_sync_ms > RESYNC_MS))
+        bt_sync(ctx);
+
     return r < 0 ? r : n;
 }
 

@@ -8,11 +8,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <wchar.h>
 
-#define MAX_DEVICES 128
-#define REFRESH_MS  4000   /* fallback poll; live signals do the real work */
-#define NAME_COLS   40     /* column budget for the device name */
+#define REFRESH_MS    4000 /* safety net; signals do the real work */
+#define MIN_REDRAW_MS 100  /* coalesce bursts: at most ~10 redraws a second */
+#define NAME_COLS     40   /* column budget for the device name */
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /* `detail` is BlueZ's own explanation when we have one; it beats strerror on
  * the errno by a mile ("br-connection-profile-unavailable" vs "I/O error"). */
@@ -147,6 +154,14 @@ static void format_device(const bt_device *d, char *buf, size_t sz) {
 
 /* Refresh the status line and device list in place, preserving the cursor.
  * Returns the number of devices now shown. */
+/* Redraw from the model. No bus traffic at all in the common case: the device
+ * list and the adapter state are already current, kept there by the signal
+ * handlers in bt.c.
+ *
+ * `devs` is the UI's own snapshot of what is on screen. Copying it here rather
+ * than holding a pointer into the model keeps the listbox rows and the array
+ * the selection indexes into consistent: bt_process() may reorder or drop
+ * model entries at any point between two redraws. */
 static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
                    bt_device *devs, int keep_sel) {
     /* The adapter can vanish under us — an unplugged dongle, rfkill, a
@@ -160,16 +175,16 @@ static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
         return 0;
     }
 
-    int n = bt_list_devices(ctx, devs, MAX_DEVICES);
+    const bt_device *model = NULL;
+    int n = bt_devices(ctx, &model);
     if (n < 0) n = 0;
-
-    bool powered = false, discovering = false;
-    bt_get_powered(ctx, &powered);
-    bt_get_discovering(ctx, &discovering);
+    if (n > BT_MAX_DEVICES) n = BT_MAX_DEVICES;
+    if (n > 0) memcpy(devs, model, (size_t)n * sizeof *devs);
 
     char status[80];
     snprintf(status, sizeof status, "Bluetooth: %-3s   Scanning: %-3s%s",
-             powered ? "on" : "off", discovering ? "yes" : "no",
+             bt_powered(ctx) ? "on" : "off",
+             bt_discovering(ctx) ? "yes" : "no",
              bt_live_updates(ctx) ? "" : "   [polling]");
     newtLabelSetText(label, status);
 
@@ -233,18 +248,21 @@ int ui_run(bt_ctx *ctx) {
     if (busfd >= 0)
         newtFormWatchFd(form, busfd, NEWT_FD_READ);
 
-    bt_device devs[MAX_DEVICES];
+    bt_device devs[BT_MAX_DEVICES];
     int selected = 0;
     int n = refresh(ctx, label, list, devs, selected);
+    long last_draw = now_ms();
+    int  pending = 0; /* model changed, redraw owed */
 
     int running = 1;
     while (running) {
         struct newtExitStruct es;
         newtFormRun(form, &es);
 
-        /* Drain the bus first: dispatches signals (dirty flag) and any agent
-         * method calls. Safe here — no form is running mid-dispatch. */
+        /* Drain the bus first: applies every signal to the model and runs any
+         * agent method calls. Safe here — no form is running mid-dispatch. */
         bt_process(ctx);
+        if (bt_take_dirty(ctx)) pending = 1;
 
         int cur = (int)(intptr_t)newtListboxGetCurrent(list);
         selected = cur;
@@ -258,18 +276,15 @@ int ui_run(bt_ctx *ctx) {
             newtComponent c = es.u.co;
             char bterr[BT_ERR_LEN] = "";
             int r = 0;
+            pending = 1; /* whatever the user did, show the result */
             if (c == b_quit) {
                 running = 0;
             } else if (c == b_power) {
-                bool p = false;
-                bt_get_powered(ctx, &p);
-                if ((r = bt_set_powered(ctx, !p, bterr, sizeof bterr)) < 0)
+                if ((r = bt_set_powered(ctx, !bt_powered(ctx), bterr, sizeof bterr)) < 0)
                     show_error("Toggle power", r, bterr);
             } else if (c == b_scan) {
-                bool d = false;
-                bt_get_discovering(ctx, &d);
-                r = d ? bt_stop_discovery(ctx, bterr, sizeof bterr)
-                      : bt_start_discovery(ctx, bterr, sizeof bterr);
+                r = bt_discovering(ctx) ? bt_stop_discovery(ctx, bterr, sizeof bterr)
+                                        : bt_start_discovery(ctx, bterr, sizeof bterr);
                 if (r < 0) show_error("Discovery", r, bterr);
             } else if (c == b_pair && sel) {
                 if ((r = bt_pair(ctx, sel->path, bterr, sizeof bterr)) < 0)
@@ -286,10 +301,22 @@ int ui_run(bt_ctx *ctx) {
                 if (r < 0) show_error(sel->connected ? "Disconnect" : "Connect", r, bterr);
             }
         }
-        /* Timer, actions and hotkeys all fall through to an in-place refresh
-         * that keeps the form (and thus the focused component) intact. */
-        if (running)
+        if (!running) break;
+
+        /* Coalesce. An active scan produces dozens of RSSI updates a second;
+         * redrawing on each one is pure waste and makes the list flicker. Draw
+         * at most every MIN_REDRAW_MS, and when a redraw is owed but too
+         * early, ask the form to wake us exactly when the window opens instead
+         * of waiting out the safety timer. */
+        long t = now_ms();
+        if (pending && t - last_draw >= MIN_REDRAW_MS) {
             n = refresh(ctx, label, list, devs, selected);
+            last_draw = t;
+            pending = 0;
+            newtFormSetTimer(form, REFRESH_MS);
+        } else if (pending) {
+            newtFormSetTimer(form, (int)(MIN_REDRAW_MS - (t - last_draw)));
+        }
     }
 
     newtFormDestroy(form);

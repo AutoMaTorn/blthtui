@@ -35,18 +35,33 @@ int bt_ensure_adapter(bt_ctx *ctx);
  * when BlueZ supplied no message. BT_ERR_LEN is a comfortable buffer size. */
 #define BT_ERR_LEN 160
 
-/* Adapter power state. */
-int bt_get_powered(bt_ctx *ctx, bool *out);
-int bt_set_powered(bt_ctx *ctx, bool on, char *err, size_t errsz);
+/* Adapter power state. Reading is free: the value is kept up to date from
+ * PropertiesChanged, so it costs no bus traffic. */
+bool bt_powered(const bt_ctx *ctx);
+int  bt_set_powered(bt_ctx *ctx, bool on, char *err, size_t errsz);
 
-/* Discovery (scanning). */
-int bt_start_discovery(bt_ctx *ctx, char *err, size_t errsz);
-int bt_stop_discovery(bt_ctx *ctx, char *err, size_t errsz);
-int bt_get_discovering(bt_ctx *ctx, bool *out);
+/* Discovery (scanning). bt_discovering() is likewise free. */
+int  bt_start_discovery(bt_ctx *ctx, char *err, size_t errsz);
+int  bt_stop_discovery(bt_ctx *ctx, char *err, size_t errsz);
+bool bt_discovering(const bt_ctx *ctx);
 
-/* Enumerate every known device via ObjectManager.GetManagedObjects.
- * Fills up to `max` entries into `out`; returns the count, or -errno. */
-int bt_list_devices(bt_ctx *ctx, bt_device *out, size_t max);
+/* ---- device model ----
+ *
+ * The context owns the device list and keeps it current from BlueZ signals;
+ * GetManagedObjects is issued once at startup and then only to recover from a
+ * gap (an unknown device, a re-acquired adapter, the slow safety resync).
+ *
+ * bt_devices() hands out the internal array — valid until the next
+ * bt_process() — and re-sorts it only when the order can actually have
+ * changed. An RSSI update alone never reorders the list, so rows do not slide
+ * out from under the cursor while a scan is running. */
+#define BT_MAX_DEVICES 128
+
+int bt_devices(bt_ctx *ctx, const bt_device **out);
+
+/* Force a full re-read of the model. Only needed after something that
+ * bypasses signals; ordinary use never has to call it. */
+int bt_sync(bt_ctx *ctx);
 
 /* Per-device actions. `path` is bt_device.path; `err` as described above.
  * bt_pair runs with a long timeout, since BlueZ only answers once the whole
@@ -58,11 +73,12 @@ int bt_remove(bt_ctx *ctx, const char *path, char *err, size_t errsz);
 
 /* File descriptor to poll for incoming BlueZ signals. */
 int bt_get_fd(bt_ctx *ctx);
-/* Drain all pending bus traffic; call after poll() reports the fd readable.
- * Returns the number of messages processed, or -errno. */
+/* Drain all pending bus traffic, applying every signal to the model; call
+ * after poll() reports the fd readable. Returns messages processed, or -errno.
+ * May issue a resync when a signal referred to something not in the model. */
 int bt_process(bt_ctx *ctx);
-/* True (and cleared) if a BlueZ signal has arrived since the last check,
- * i.e. the device list may have changed and should be refreshed. */
+/* True (and cleared) if the model changed since the last check, i.e. the UI
+ * has something new to draw. */
 bool bt_take_dirty(bt_ctx *ctx);
 
 /* ---- pairing agent (stage 6) ----
