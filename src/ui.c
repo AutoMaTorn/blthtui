@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 700 /* expose wcwidth() under -std=c11 */
+
 #include "ui.h"
 #include "log.h"
 
@@ -6,13 +8,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #define MAX_DEVICES 128
 #define REFRESH_MS  4000   /* fallback poll; live signals do the real work */
+#define NAME_COLS   40     /* column budget for the device name */
 
-static void show_error(const char *action, int err) {
-    log_msg("UI error: %s failed: %s", action, strerror(-err));
-    newtWinMessage("Error", "OK", "%s failed: %s", action, strerror(-err));
+/* `detail` is BlueZ's own explanation when we have one; it beats strerror on
+ * the errno by a mile ("br-connection-profile-unavailable" vs "I/O error"). */
+static void show_error(const char *action, int err, const char *detail) {
+    const char *text = (detail && *detail) ? detail : strerror(-err);
+    log_msg("UI error: %s failed: %s", action, text);
+    newtWinMessage("Error", "OK", "%s failed:\n\n%s", action, text);
 }
 
 /* ---- pairing agent callbacks (invoked by bt.c during pairing) ---- */
@@ -75,21 +82,84 @@ static void ui_display(void *ud, const char *dev, const char *what) {
     newtWinMessage((char *)"Pairing", (char *)"OK", "%s\n\n%s", dev, what);
 }
 
+/* Copy at most `cols` terminal columns of UTF-8 text into buf, then pad with
+ * spaces to exactly that width.
+ *
+ * printf's "%-40.40s" cannot do this: its precision counts BYTES. A device
+ * named in Cyrillic — or with the emoji vendors love — gets cut mid-character,
+ * the terminal prints replacement garbage, and every column after it slides.
+ * Non-printing characters become '?' rather than reaching the terminal, since
+ * device names are attacker-supplied and an embedded escape sequence would
+ * otherwise be interpreted. */
+static void pad_utf8(char *buf, size_t bufsz, const char *src, int cols) {
+    size_t out = 0;
+    int used = 0;
+    mbstate_t st;
+    memset(&st, 0, sizeof st);
+
+    while (*src && used < cols) {
+        wchar_t wc = 0;
+        size_t n = mbrtowc(&wc, src, MB_CUR_MAX, &st);
+        int w;
+
+        if (n == (size_t)-1 || n == (size_t)-2) { /* invalid or truncated */
+            memset(&st, 0, sizeof st);
+            n = 1;
+            w = 1;
+            wc = L'?';
+        } else if (n == 0) {
+            break;                                /* embedded NUL */
+        } else {
+            w = wcwidth(wc);
+            if (w < 0) { w = 1; wc = L'?'; }      /* control character */
+        }
+
+        if (used + w > cols) break;               /* would overrun the budget */
+
+        if (wc == L'?' ) {
+            if (out + 1 >= bufsz) break;
+            buf[out++] = '?';
+        } else {
+            if (out + n >= bufsz) break;
+            memcpy(buf + out, src, n);
+            out += n;
+        }
+        src  += n;
+        used += w;
+    }
+
+    while (used < cols && out + 1 < bufsz) { buf[out++] = ' '; used++; }
+    buf[out] = '\0';
+}
+
 /* Build a one-line listbox label for a device: name only (BlueZ already
  * falls back to the address when a device has no friendly name). */
 static void format_device(const bt_device *d, char *buf, size_t sz) {
     /* Plain ASCII markers so every terminal renders them: nmtui-style. */
     const char *mark = d->connected ? "* " : (d->paired ? "+ " : "  ");
+    char name[BT_NAME_LEN + NAME_COLS];
+    pad_utf8(name, sizeof name, d->name, NAME_COLS);
     char rssi[16] = "";
     if (d->has_rssi && !d->connected)
         snprintf(rssi, sizeof rssi, "   %ddBm", d->rssi);
-    snprintf(buf, sz, "%s%-40.40s%s", mark, d->name, rssi);
+    snprintf(buf, sz, "%s%s%s", mark, name, rssi);
 }
 
 /* Refresh the status line and device list in place, preserving the cursor.
  * Returns the number of devices now shown. */
 static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
                    bt_device *devs, int keep_sel) {
+    /* The adapter can vanish under us — an unplugged dongle, rfkill, a
+     * bluetoothd restart. Say so instead of showing a stale list while every
+     * call quietly fails. */
+    if (bt_ensure_adapter(ctx) < 0) {
+        newtLabelSetText(label, "Bluetooth: no adapter        ");
+        newtListboxClear(list);
+        newtListboxAppendEntry(list, "  (adapter disconnected)", NULL);
+        newtListboxSetCurrent(list, 0);
+        return 0;
+    }
+
     int n = bt_list_devices(ctx, devs, MAX_DEVICES);
     if (n < 0) n = 0;
 
@@ -98,8 +168,9 @@ static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
     bt_get_discovering(ctx, &discovering);
 
     char status[80];
-    snprintf(status, sizeof status, "Bluetooth: %-3s   Scanning: %-3s",
-             powered ? "on" : "off", discovering ? "yes" : "no");
+    snprintf(status, sizeof status, "Bluetooth: %-3s   Scanning: %-3s%s",
+             powered ? "on" : "off", discovering ? "yes" : "no",
+             bt_live_updates(ctx) ? "" : "   [polling]");
     newtLabelSetText(label, status);
 
     newtListboxClear(list);
@@ -107,7 +178,7 @@ static int refresh(bt_ctx *ctx, newtComponent label, newtComponent list,
         newtListboxAppendEntry(list, "  (no devices — press <Scan>)", NULL);
     } else {
         for (int i = 0; i < n; i++) {
-            char line[128];
+            char line[256];
             format_device(&devs[i], line, sizeof line);
             newtListboxAppendEntry(list, line, (void *)(intptr_t)i);
         }
@@ -185,29 +256,34 @@ int ui_run(bt_ctx *ctx) {
                 running = 0;
         } else if (es.reason == NEWT_EXIT_COMPONENT) {
             newtComponent c = es.u.co;
+            char bterr[BT_ERR_LEN] = "";
             int r = 0;
             if (c == b_quit) {
                 running = 0;
             } else if (c == b_power) {
                 bool p = false;
                 bt_get_powered(ctx, &p);
-                if ((r = bt_set_powered(ctx, !p)) < 0) show_error("Toggle power", r);
+                if ((r = bt_set_powered(ctx, !p, bterr, sizeof bterr)) < 0)
+                    show_error("Toggle power", r, bterr);
             } else if (c == b_scan) {
                 bool d = false;
                 bt_get_discovering(ctx, &d);
-                r = d ? bt_stop_discovery(ctx) : bt_start_discovery(ctx);
-                if (r < 0) show_error("Discovery", r);
+                r = d ? bt_stop_discovery(ctx, bterr, sizeof bterr)
+                      : bt_start_discovery(ctx, bterr, sizeof bterr);
+                if (r < 0) show_error("Discovery", r, bterr);
             } else if (c == b_pair && sel) {
-                if ((r = bt_pair(ctx, sel->path)) < 0) show_error("Pair", r);
+                if ((r = bt_pair(ctx, sel->path, bterr, sizeof bterr)) < 0)
+                    show_error("Pair", r, bterr);
             } else if (c == b_remove && sel) {
                 if (newtWinChoice("Remove device", "Remove", "Cancel",
                                   "Remove %s (%s)?", sel->name, sel->address) == 1) {
-                    if ((r = bt_remove(ctx, sel->path)) < 0) show_error("Remove", r);
+                    if ((r = bt_remove(ctx, sel->path, bterr, sizeof bterr)) < 0)
+                        show_error("Remove", r, bterr);
                 }
             } else if (c == list && sel) {
-                r = sel->connected ? bt_disconnect(ctx, sel->path)
-                                   : bt_connect(ctx, sel->path);
-                if (r < 0) show_error(sel->connected ? "Disconnect" : "Connect", r);
+                r = sel->connected ? bt_disconnect(ctx, sel->path, bterr, sizeof bterr)
+                                   : bt_connect(ctx, sel->path, bterr, sizeof bterr);
+                if (r < 0) show_error(sel->connected ? "Disconnect" : "Connect", r, bterr);
             }
         }
         /* Timer, actions and hotkeys all fall through to an in-place refresh

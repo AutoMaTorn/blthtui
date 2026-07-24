@@ -1,3 +1,4 @@
+#include <locale.h>
 #include <stdio.h>
 
 #include "bt.h"
@@ -5,6 +6,11 @@
 #include "ui.h"
 
 int main(void) {
+    /* Without this, mbrtowc/wcwidth work in the C locale and treat UTF-8
+     * device names as bytes — which is exactly what the name column must not
+     * do. newt needs it for the same reason. */
+    setlocale(LC_ALL, "");
+
     log_init();
 
     const char *err = NULL;

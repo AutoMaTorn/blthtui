@@ -16,4 +16,5 @@ debian/*.substvars
 debian/*.debhelper.log
 debian/debhelper-build-stamp
 /CLAUDE.md
+/PLAN.md
 /.claude/

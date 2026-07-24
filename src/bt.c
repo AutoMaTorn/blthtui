@@ -16,13 +16,31 @@
 #define AGENT_PATH    "/org/blthtui/agent"
 #define AGENT_CAPS    "KeyboardDisplay"
 
+/* BlueZ answers Pair() only once the whole exchange is over, and that includes
+ * the time our agent spends waiting for the user in a modal dialog. sd-bus
+ * defaults to 25s, which a distracted user blows through easily. */
+#define PAIR_TIMEOUT_USEC (180 * 1000000ULL)
+
 struct bt_ctx {
     sd_bus *bus;
-    char    adapter[BT_PATH_LEN]; /* e.g. "/org/bluez/hci0" */
+    char    adapter[BT_PATH_LEN]; /* e.g. "/org/bluez/hci0", "" once gone */
     int     dirty;                /* set by signal callbacks     */
+    bool    live;                 /* signal subscriptions are in place */
     bt_agent_cb agent;
     bool    agent_set;
+    sd_bus_slot *agent_slot;      /* owns the exported Agent1 object */
+    bool    agent_registered;     /* BlueZ accepted RegisterAgent */
 };
+
+/* Copy BlueZ's own error text into the caller's buffer, falling back to the
+ * errno string. `e` may be an unset sd_bus_error. */
+static void set_err(char *err, size_t errsz, const sd_bus_error *e, int r) {
+    if (!err || errsz == 0) return;
+    if (e && e->message && *e->message)
+        snprintf(err, errsz, "%s", e->message);
+    else
+        snprintf(err, errsz, "%s", strerror(r < 0 ? -r : r));
+}
 
 /* ---- small helpers for reading typed variants out of an a{sv} dict ---- */
 
@@ -165,6 +183,47 @@ static int on_bt_signal(sd_bus_message *m, void *userdata, sd_bus_error *e) {
     return 0;
 }
 
+/* InterfacesRemoved carries "oas": the object that went away and which of its
+ * interfaces went with it. We only care about one case — our own adapter being
+ * unplugged — because every call we make afterwards would fail with a
+ * confusing errno while the UI kept pretending all was well. */
+static int on_interfaces_removed(sd_bus_message *m, void *userdata, sd_bus_error *e) {
+    bt_ctx *ctx = userdata;
+    (void)e;
+    ctx->dirty = 1;
+
+    const char *path = NULL;
+    if (sd_bus_message_read_basic(m, 'o', &path) < 0 || !path)
+        return 0;
+    if (ctx->adapter[0] == '\0' || strcmp(path, ctx->adapter) != 0)
+        return 0;
+
+    if (sd_bus_message_enter_container(m, 'a', "s") < 0)
+        return 0;
+    const char *iface = NULL;
+    while (sd_bus_message_read_basic(m, 's', &iface) > 0) {
+        if (strcmp(iface, ADAPTER_IFACE) == 0) {
+            log_msg("adapter %s went away", ctx->adapter);
+            ctx->adapter[0] = '\0';
+            break;
+        }
+    }
+    sd_bus_message_exit_container(m);
+    return 0;
+}
+
+int bt_ensure_adapter(bt_ctx *ctx) {
+    if (ctx->adapter[0] != '\0') return 0;
+
+    int r = walk_objects(ctx->bus, NULL, 0, NULL, ctx->adapter, sizeof ctx->adapter);
+    if (r < 0 || ctx->adapter[0] == '\0') return -ENODEV;
+
+    log_msg("adapter reacquired: %s", ctx->adapter);
+    return 0;
+}
+
+bool bt_live_updates(const bt_ctx *ctx) { return ctx->live; }
+
 bt_ctx *bt_open(const char **err) {
     bt_ctx *c = calloc(1, sizeof *c);
     if (!c) { if (err) *err = "out of memory"; return NULL; }
@@ -185,21 +244,40 @@ bt_ctx *bt_open(const char **err) {
     log_msg("bt_open: adapter %s", c->adapter);
 
     /* Live updates: any of these signals means the device list may have
-     * changed. The callback just raises a flag the UI polls via bt_take_dirty. */
-    sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
-                        "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
-                        on_bt_signal, c);
-    sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
-                        "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
-                        on_bt_signal, c);
-    sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
-                        "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                        on_bt_signal, c);
+     * changed. The callback just raises a flag the UI polls via bt_take_dirty.
+     * A failed subscription is not fatal — the UI still has its timer — but it
+     * must not pass silently, so track it and let the UI say so. */
+    int m1 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
+                                 "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
+                                 on_bt_signal, c);
+    int m2 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
+                                 "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
+                                 on_interfaces_removed, c);
+    int m3 = sd_bus_match_signal(c->bus, NULL, BLUEZ_SVC, NULL,
+                                 "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                 on_bt_signal, c);
+    c->live = (m1 >= 0 && m2 >= 0 && m3 >= 0);
+    if (!c->live)
+        log_msg("signal subscriptions failed (%d/%d/%d) — falling back to the timer",
+                m1, m2, m3);
     return c;
 }
 
 void bt_close(bt_ctx *ctx) {
     if (!ctx) return;
+
+    /* Hand the agent back before dropping the bus, so BlueZ sees a clean
+     * withdrawal rather than our name simply vanishing. */
+    if (ctx->agent_registered) {
+        sd_bus_error err = SD_BUS_ERROR_NULL;
+        int r = sd_bus_call_method(ctx->bus, BLUEZ_SVC, "/org/bluez", AGENTMGR_IFACE,
+                                   "UnregisterAgent", &err, NULL, "o", AGENT_PATH);
+        log_msg("agent: UnregisterAgent -> %d%s%s", r,
+                r < 0 && err.message ? " " : "", r < 0 && err.message ? err.message : "");
+        sd_bus_error_free(&err);
+        ctx->agent_registered = false;
+    }
+    if (ctx->agent_slot) sd_bus_slot_unref(ctx->agent_slot);
     if (ctx->bus) sd_bus_unref(ctx->bus);
     free(ctx);
 }
@@ -217,12 +295,13 @@ int bt_get_powered(bt_ctx *ctx, bool *out) {
     return 0;
 }
 
-int bt_set_powered(bt_ctx *ctx, bool on) {
+int bt_set_powered(bt_ctx *ctx, bool on, char *errbuf, size_t errsz) {
     sd_bus_error err = SD_BUS_ERROR_NULL;
     int r = sd_bus_set_property(ctx->bus, BLUEZ_SVC, ctx->adapter,
                                 ADAPTER_IFACE, "Powered", &err, "b", (int)on);
     log_msg("set Powered=%d -> %d%s%s", on, r,
             r < 0 && err.message ? " " : "", r < 0 && err.message ? err.message : "");
+    if (r < 0) set_err(errbuf, errsz, &err, r);
     sd_bus_error_free(&err);
     return r < 0 ? r : 0;
 }
@@ -238,18 +317,23 @@ int bt_get_discovering(bt_ctx *ctx, bool *out) {
     return 0;
 }
 
-static int adapter_method(bt_ctx *ctx, const char *method) {
+static int adapter_method(bt_ctx *ctx, const char *method, char *errbuf, size_t errsz) {
     sd_bus_error err = SD_BUS_ERROR_NULL;
     int r = sd_bus_call_method(ctx->bus, BLUEZ_SVC, ctx->adapter,
                                ADAPTER_IFACE, method, &err, NULL, "");
     log_msg("adapter.%s -> %d%s%s", method, r,
             r < 0 && err.message ? " " : "", r < 0 && err.message ? err.message : "");
+    if (r < 0) set_err(errbuf, errsz, &err, r);
     sd_bus_error_free(&err);
     return r < 0 ? r : 0;
 }
 
-int bt_start_discovery(bt_ctx *ctx) { return adapter_method(ctx, "StartDiscovery"); }
-int bt_stop_discovery(bt_ctx *ctx)  { return adapter_method(ctx, "StopDiscovery");  }
+int bt_start_discovery(bt_ctx *ctx, char *err, size_t errsz) {
+    return adapter_method(ctx, "StartDiscovery", err, errsz);
+}
+int bt_stop_discovery(bt_ctx *ctx, char *err, size_t errsz) {
+    return adapter_method(ctx, "StopDiscovery", err, errsz);
+}
 
 /* Sort key: connected first, then paired, then the rest. */
 static int dev_rank(const bt_device *d) {
@@ -278,26 +362,46 @@ int bt_list_devices(bt_ctx *ctx, bt_device *out, size_t max) {
     return n;
 }
 
-static int device_method(bt_ctx *ctx, const char *path, const char *method) {
+/* One Device1 method call. `timeout_usec` of 0 means sd-bus's default (25s);
+ * pass something generous for calls that wait on a human. */
+static int device_method(bt_ctx *ctx, const char *path, const char *method,
+                         uint64_t timeout_usec, char *errbuf, size_t errsz) {
     sd_bus_error err = SD_BUS_ERROR_NULL;
-    int r = sd_bus_call_method(ctx->bus, BLUEZ_SVC, path,
-                               DEVICE_IFACE, method, &err, NULL, "");
+    sd_bus_message *req = NULL;
+    int r = sd_bus_message_new_method_call(ctx->bus, &req, BLUEZ_SVC, path,
+                                           DEVICE_IFACE, method);
+    if (r < 0) {
+        set_err(errbuf, errsz, NULL, r);
+        return r;
+    }
+
+    r = sd_bus_call(ctx->bus, req, timeout_usec, &err, NULL);
     log_msg("device.%s %s -> %d%s%s", method, path, r,
             r < 0 && err.message ? " " : "", r < 0 && err.message ? err.message : "");
+    if (r < 0) set_err(errbuf, errsz, &err, r);
+
+    sd_bus_message_unref(req);
     sd_bus_error_free(&err);
     return r < 0 ? r : 0;
 }
 
-int bt_connect(bt_ctx *ctx, const char *path)    { return device_method(ctx, path, "Connect"); }
-int bt_disconnect(bt_ctx *ctx, const char *path) { return device_method(ctx, path, "Disconnect"); }
-int bt_pair(bt_ctx *ctx, const char *path)       { return device_method(ctx, path, "Pair"); }
+int bt_connect(bt_ctx *ctx, const char *path, char *err, size_t errsz) {
+    return device_method(ctx, path, "Connect", 0, err, errsz);
+}
+int bt_disconnect(bt_ctx *ctx, const char *path, char *err, size_t errsz) {
+    return device_method(ctx, path, "Disconnect", 0, err, errsz);
+}
+int bt_pair(bt_ctx *ctx, const char *path, char *err, size_t errsz) {
+    return device_method(ctx, path, "Pair", PAIR_TIMEOUT_USEC, err, errsz);
+}
 
-int bt_remove(bt_ctx *ctx, const char *path) {
+int bt_remove(bt_ctx *ctx, const char *path, char *errbuf, size_t errsz) {
     sd_bus_error err = SD_BUS_ERROR_NULL;
     int r = sd_bus_call_method(ctx->bus, BLUEZ_SVC, ctx->adapter,
                                ADAPTER_IFACE, "RemoveDevice", &err, NULL, "o", path);
     log_msg("adapter.RemoveDevice %s -> %d%s%s", path, r,
             r < 0 && err.message ? " " : "", r < 0 && err.message ? err.message : "");
+    if (r < 0) set_err(errbuf, errsz, &err, r);
     sd_bus_error_free(&err);
     return r < 0 ? r : 0;
 }
@@ -493,7 +597,7 @@ int bt_register_agent(bt_ctx *ctx, const bt_agent_cb *cb) {
     ctx->agent = *cb;
     ctx->agent_set = true;
 
-    int r = sd_bus_add_object_vtable(ctx->bus, NULL, AGENT_PATH,
+    int r = sd_bus_add_object_vtable(ctx->bus, &ctx->agent_slot, AGENT_PATH,
                                      AGENT_IFACE, agent_vtable, ctx);
     if (r < 0) {
         log_msg("agent: add_object_vtable failed: %s", strerror(-r));
@@ -509,6 +613,7 @@ int bt_register_agent(bt_ctx *ctx, const bt_agent_cb *cb) {
         sd_bus_error_free(&err);
         return r;
     }
+    ctx->agent_registered = true;
     sd_bus_error_free(&err);
 
     /* Becoming the default agent may be denied if another one holds it

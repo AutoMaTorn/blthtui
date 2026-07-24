@@ -14,27 +14,47 @@ typedef struct bt_ctx bt_ctx;
 bt_ctx *bt_open(const char **err);
 void    bt_close(bt_ctx *ctx);
 
-/* D-Bus object path of the selected adapter, e.g. "/org/bluez/hci0". */
+/* D-Bus object path of the selected adapter, e.g. "/org/bluez/hci0", or an
+ * empty string once the adapter has gone away (unplugged dongle). */
 const char *bt_adapter_path(const bt_ctx *ctx);
 
-/* Adapter power state. bt_set_powered returns 0 on success, -errno on error. */
-int bt_get_powered(bt_ctx *ctx, bool *out);
-int bt_set_powered(bt_ctx *ctx, bool on);
+/* True while live signal subscriptions are in place. When false the caller is
+ * running blind on its own timer and should say so in the UI. */
+bool bt_live_updates(const bt_ctx *ctx);
 
-/* Discovery (scanning). Return 0 on success, -errno on error. */
-int bt_start_discovery(bt_ctx *ctx);
-int bt_stop_discovery(bt_ctx *ctx);
+/* Make sure an adapter is selected, re-scanning if the previous one vanished.
+ * Returns 0 when one is available, -ENODEV when none is. Cheap when the
+ * current adapter is still valid: no bus traffic at all. */
+int bt_ensure_adapter(bt_ctx *ctx);
+
+/* ---- actions ----
+ *
+ * Each returns 0 on success or -errno. On failure, when `err` is non-NULL it
+ * receives BlueZ's own error text ("br-connection-profile-unavailable"), which
+ * is far more useful than strerror() on the errno; it falls back to strerror()
+ * when BlueZ supplied no message. BT_ERR_LEN is a comfortable buffer size. */
+#define BT_ERR_LEN 160
+
+/* Adapter power state. */
+int bt_get_powered(bt_ctx *ctx, bool *out);
+int bt_set_powered(bt_ctx *ctx, bool on, char *err, size_t errsz);
+
+/* Discovery (scanning). */
+int bt_start_discovery(bt_ctx *ctx, char *err, size_t errsz);
+int bt_stop_discovery(bt_ctx *ctx, char *err, size_t errsz);
 int bt_get_discovering(bt_ctx *ctx, bool *out);
 
 /* Enumerate every known device via ObjectManager.GetManagedObjects.
  * Fills up to `max` entries into `out`; returns the count, or -errno. */
 int bt_list_devices(bt_ctx *ctx, bt_device *out, size_t max);
 
-/* Per-device actions. `path` is bt_device.path. Return 0 / -errno. */
-int bt_connect(bt_ctx *ctx, const char *path);
-int bt_disconnect(bt_ctx *ctx, const char *path);
-int bt_pair(bt_ctx *ctx, const char *path);
-int bt_remove(bt_ctx *ctx, const char *path);
+/* Per-device actions. `path` is bt_device.path; `err` as described above.
+ * bt_pair runs with a long timeout, since BlueZ only answers once the whole
+ * pairing exchange — including our agent's dialogs — has finished. */
+int bt_connect(bt_ctx *ctx, const char *path, char *err, size_t errsz);
+int bt_disconnect(bt_ctx *ctx, const char *path, char *err, size_t errsz);
+int bt_pair(bt_ctx *ctx, const char *path, char *err, size_t errsz);
+int bt_remove(bt_ctx *ctx, const char *path, char *err, size_t errsz);
 
 /* File descriptor to poll for incoming BlueZ signals. */
 int bt_get_fd(bt_ctx *ctx);
