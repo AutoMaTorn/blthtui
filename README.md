@@ -14,13 +14,21 @@ have a terminal and `bluetoothd`.
 - Toggle the Bluetooth adapter on/off
 - Scan for nearby devices
 - Connect / disconnect (Enter on a device)
-- Pair and remove devices
+- Pair, trust and remove devices
 - Interactive pairing: PIN / passkey entry and confirmation dialogs
   (registers as a BlueZ `org.bluez.Agent1`)
+- Connect and pair run asynchronously — the interface stays live and shows the
+  operation in progress instead of freezing
+- Device details on demand: battery level (via `org.bluez.Battery1`), device
+  type and service UUIDs
+- Filter the list by name, or show only paired devices
+- Adapter picker when more than one adapter is present
 - Live list, updated straight from BlueZ signals (device added/removed,
-  connected, RSSI…) — not just a timer
+  connected, RSSI…) rather than by re-enumerating on a timer; RSSI updates
+  don't reorder rows under the cursor
 - Paired (`+`) and connected (`*`) markers; connected and paired devices sort
   to the top, the rest by signal strength
+- Device names in any language render correctly (UTF-8-aware, width-correct)
 
 ## Build
 
@@ -42,12 +50,19 @@ group (root is not required).
 
 ## Keys
 
-| Key            | Action                        |
-|----------------|-------------------------------|
-| Up / Down      | Move in the device list       |
-| Enter          | Connect / disconnect selected |
-| Tab            | Move between list and buttons |
-| F10 / Esc / q  | Quit                          |
+| Key            | Action                              |
+|----------------|-------------------------------------|
+| Up / Down      | Move in the device list             |
+| Enter          | Connect / disconnect selected       |
+| `p`            | Pair selected                       |
+| `t`            | Toggle trust on selected            |
+| `d`            | Show device details                 |
+| `r`            | Remove selected                     |
+| `s`            | Start / stop scanning               |
+| `/`            | Filter the list by name             |
+| `o`            | Toggle showing only paired devices  |
+| Tab            | Move between list and buttons       |
+| F10 / Esc / q  | Quit                                |
 
 ## Installing on other machines
 
@@ -63,7 +78,7 @@ pulls in the runtime dependencies (`libnewt0.52`, `libsystemd0`, `bluez`)
 automatically:
 
 ```sh
-sudo apt install ./blthtui_0.1.0_amd64.deb
+sudo apt install ./blthtui_0.2.0_amd64.deb
 ```
 
 Remove with `sudo apt remove blthtui`.
