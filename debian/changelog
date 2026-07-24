@@ -1,0 +1,6 @@
+blttui (0.1.0) unstable; urgency=medium
+
+  * Initial release: adapter toggle, scan, connect/disconnect, pair/remove,
+    interactive pairing agent, live signal-driven device list.
+
+ -- Torn <automatorn@gmail.com>  Fri, 24 Jul 2026 01:25:56 +0300

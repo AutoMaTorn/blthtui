@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+# Build with debhelper; hardening flags come from dpkg-buildflags via dh.
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+# The Makefile's `test` target is a build-only debug harness, not a test
+# suite — don't let dh run it during package build.
+override_dh_auto_test:
+
+# Our Makefile defaults PREFIX to /usr/local (correct for a manual install),
+# but Debian packages must install under /usr.
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/blttui PREFIX=/usr

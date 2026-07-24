@@ -1,0 +1,26 @@
+Source: blttui
+Section: admin
+Priority: optional
+Maintainer: Torn <automatorn@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               libnewt-dev,
+               libsystemd-dev,
+               pkg-config
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: blttui
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, bluez
+Description: lightweight nmtui-style TUI for Bluetooth
+ blttui is a small, fast terminal interface for managing Bluetooth on Linux,
+ styled after NetworkManager's nmtui. It talks to BlueZ over D-Bus and lets
+ you:
+ .
+  * toggle the adapter on/off and scan for devices;
+  * connect, disconnect, pair and remove devices;
+  * complete interactive pairing (PIN / passkey / confirmation) via a
+    registered org.bluez.Agent1 agent.
+ .
+ The device list updates live from BlueZ signals and keeps connected and
+ paired devices at the top.
