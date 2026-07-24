@@ -371,7 +371,10 @@ int ui_run(bt_ctx *ctx) {
         }
 
         int cur = (int)(intptr_t)newtListboxGetCurrent(list);
-        selected = cur;
+        /* Only real device rows carry a non-negative payload. The "list full"
+         * notice carries -1; letting that overwrite `selected` would clamp to 0
+         * on the next redraw and yank the cursor to the top of the list. */
+        if (cur >= 0) selected = cur;
         const bt_device *sel = (n > 0 && cur >= 0 && cur < n) ? &devs[cur] : NULL;
         char bterr[BT_ERR_LEN] = "";
         int r = 0;

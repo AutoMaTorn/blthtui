@@ -585,6 +585,10 @@ int bt_device_info(bt_ctx *ctx, const char *path, bt_devinfo *out) {
             while (out->nuuid < (int)(sizeof out->uuid / sizeof out->uuid[0]) &&
                    sd_bus_message_read_basic(m, 's', &u) > 0)
                 snprintf(out->uuid[out->nuuid++], sizeof out->uuid[0], "%s", u);
+            /* A device may advertise more UUIDs than we keep. Drain the rest so
+             * exit_container doesn't fail with -EBUSY on a partial read. */
+            while (sd_bus_message_read_basic(m, 's', &u) > 0)
+                ;
             sd_bus_message_exit_container(m);
         }
         sd_bus_message_unref(m);

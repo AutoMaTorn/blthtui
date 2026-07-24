@@ -1,3 +1,13 @@
+blthtui (0.2.1) unstable; urgency=medium
+
+  * Keep the list cursor in place when it is parked on the "list full" notice:
+    the notice row no longer overwrites the remembered selection, which used to
+    snap the cursor to the top on the next redraw.
+  * Drain the remaining service UUIDs in bt_device_info() before leaving the
+    array, so devices advertising more than 8 UUIDs no longer trip -EBUSY.
+
+ -- Torn <automatorn@gmail.com>  Fri, 24 Jul 2026 07:29:47 +0300
+
 blthtui (0.2.0) unstable; urgency=medium
 
   * Truncate device names by character instead of by byte, so non-ASCII names

@@ -124,7 +124,7 @@ bool bt_take_dirty(bt_ctx *ctx);
  *
  * The UI supplies these callbacks; BlueZ invokes them via our registered
  * org.bluez.Agent1 object whenever a pairing needs user interaction. They run
- * synchronously inside bt_process()/bt_pair(), where it is safe to draw. */
+ * synchronously inside bt_process(), where it is safe to draw. */
 typedef struct {
     void *userdata;
     /* Numeric confirmation. passkey >= 0: "does 000000 match?"; passkey < 0:
