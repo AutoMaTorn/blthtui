@@ -1,4 +1,4 @@
-# blthtui
+# bluetui
 
 *[English version](README.md)*
 
@@ -42,7 +42,7 @@ make
 ## Запуск
 
 ```sh
-./blthtui
+./bluetui
 ```
 
 `bluetoothd` должен быть запущен, а ваш пользователь — состоять в группе
@@ -70,7 +70,7 @@ make
 
 ```sh
 sudo apt install build-essential debhelper libnewt-dev libsystemd-dev pkg-config
-dpkg-buildpackage -b -us -uc          # создаст ../blthtui_<версия>_amd64.deb
+dpkg-buildpackage -b -us -uc          # создаст ../bluetui_<версия>_amd64.deb
 ```
 
 Скопируйте получившийся `.deb` на любую машину с Debian или Ubuntu и
@@ -78,28 +78,28 @@ dpkg-buildpackage -b -us -uc          # создаст ../blthtui_<версия>
 `bluez`):
 
 ```sh
-sudo apt install ./blthtui_0.2.0_amd64.deb
+sudo apt install ./bluetui_0.2.1_amd64.deb
 ```
 
-Удаление: `sudo apt remove blthtui`.
+Удаление: `sudo apt remove bluetui`.
 
-Вместе с основным пакетом собирается `blthtui-dbgsym_<версия>_amd64.deb`. В нём
+Вместе с основным пакетом собирается `bluetui-dbgsym_<версия>_amd64.deb`. В нём
 лежат только отладочные символы: `dh_strip` вырезает их из бинарника и
-связывает с ним по Build-ID. Для работы blthtui он не нужен — ставьте его рядом
+связывает с ним по Build-ID. Для работы bluetui он не нужен — ставьте его рядом
 с основным пакетом, когда нужен читаемый бэктрейс в `gdb` или при разборе core
 dump.
 
 ## Отладка
 
-**Режим лога.** Укажите в `BLTHTUI_LOG` путь к файлу, чтобы записывать каждый
+**Режим лога.** Укажите в `BLUETUI_LOG` путь к файлу, чтобы записывать каждый
 вызов D-Bus, его результат и текст ошибки (без переменной ничего не пишется):
 
 ```sh
-BLTHTUI_LOG=/tmp/blthtui.log ./blthtui   # затем в другом терминале:
-tail -f /tmp/blthtui.log
+BLUETUI_LOG=/tmp/bluetui.log ./bluetui   # затем в другом терминале:
+tail -f /tmp/bluetui.log
 ```
 
-**Сборка с санитайзерами.** `make debug` создаёт `./blthtui-debug` с
+**Сборка с санитайзерами.** `make debug` создаёт `./bluetui-debug` с
 AddressSanitizer и UndefinedBehaviorSanitizer — они ловят утечки и некорректную
 работу с памятью в ручном разборе сообщений sd-bus.
 
@@ -129,7 +129,7 @@ src/
   device.h   модель устройства
   bt.c/.h    доступ к BlueZ через sd-bus
   ui.c/.h    интерфейс на newt + главный цикл
-  log.c/.h   опциональный файловый лог (BLTHTUI_LOG)
+  log.c/.h   опциональный файловый лог (BLUETUI_LOG)
   main.c     точка входа
 tools/
   bttest.c   headless-харнесс для отладки (make test)

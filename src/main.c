@@ -16,7 +16,7 @@ int main(void) {
     const char *err = NULL;
     bt_ctx *ctx = bt_open(&err);
     if (!ctx) {
-        fprintf(stderr, "blthtui: %s\n", err ? err : "initialisation failed");
+        fprintf(stderr, "bluetui: %s\n", err ? err : "initialisation failed");
         log_msg("bt_open failed: %s", err ? err : "?");
         log_close();
         return 1;

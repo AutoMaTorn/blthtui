@@ -1,11 +1,11 @@
 /* Headless smoke test / debug harness for the BlueZ layer — no UI.
  *
  * Exercises bt.c directly so it can be run under gdb or ASan without newt
- * fighting for the terminal. Honours BLTHTUI_LOG just like the real binary.
+ * fighting for the terminal. Honours BLUETUI_LOG just like the real binary.
  *
  * Build:  make test   (produces ./bttest)
  * Run:    ./bttest
- *         BLTHTUI_LOG=/tmp/blthtui.log ./bttest
+ *         BLUETUI_LOG=/tmp/bluetui.log ./bttest
  */
 #include <stdio.h>
 

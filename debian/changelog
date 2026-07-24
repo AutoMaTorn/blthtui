@@ -1,14 +1,18 @@
-blthtui (0.2.1) UNRELEASED; urgency=medium
+bluetui (0.2.1) unstable; urgency=medium
 
+  * Rename the project from blthtui to bluetui: source and binary package,
+    binary name, the BLTHTUI_LOG environment variable (now BLUETUI_LOG) and the
+    pairing agent's D-Bus object path (now /org/bluetui/agent). The package
+    rename is not an upgrade path — remove blthtui before installing bluetui.
   * Keep the list cursor in place when it is parked on the "list full" notice:
     the notice row no longer overwrites the remembered selection, which used to
     snap the cursor to the top on the next redraw.
   * Drain the remaining service UUIDs in bt_device_info() before leaving the
     array, so devices advertising more than 8 UUIDs no longer trip -EBUSY.
 
- -- Torn <automatorn@gmail.com>  Fri, 24 Jul 2026 07:29:47 +0300
+ -- Torn <automatorn@gmail.com>  Fri, 24 Jul 2026 16:28:17 +0300
 
-blthtui (0.2.0) unstable; urgency=medium
+bluetui (0.2.0) unstable; urgency=medium
 
   * Truncate device names by character instead of by byte, so non-ASCII names
     no longer render as garbage; non-printing characters are replaced rather
@@ -30,7 +34,7 @@ blthtui (0.2.0) unstable; urgency=medium
 
  -- Torn <automatorn@gmail.com>  Fri, 24 Jul 2026 06:56:06 +0300
 
-blthtui (0.1.0) unstable; urgency=medium
+bluetui (0.1.0) unstable; urgency=medium
 
   * Initial release: adapter toggle, scan, connect/disconnect, pair/remove,
     interactive pairing agent, live signal-driven device list.

@@ -10,12 +10,12 @@
 static FILE *lf = NULL;
 
 void log_init(void) {
-    const char *path = getenv("BLTHTUI_LOG");
+    const char *path = getenv("BLUETUI_LOG");
     if (!path || !*path) return;
     lf = fopen(path, "a");
     if (!lf) return;
     setvbuf(lf, NULL, _IOLBF, 0); /* line-buffered: tail -f sees it live */
-    log_msg("==== blthtui session start ====");
+    log_msg("==== bluetui session start ====");
 }
 
 void log_msg(const char *fmt, ...) {
@@ -38,7 +38,7 @@ void log_msg(const char *fmt, ...) {
 
 void log_close(void) {
     if (!lf) return;
-    log_msg("==== blthtui session end ====");
+    log_msg("==== bluetui session end ====");
     fclose(lf);
     lf = NULL;
 }

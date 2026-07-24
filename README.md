@@ -1,4 +1,4 @@
-# blthtui
+# bluetui
 
 *[Русская версия](README.ru.md)*
 
@@ -42,7 +42,7 @@ make
 ## Run
 
 ```sh
-./blthtui
+./bluetui
 ```
 
 `bluetoothd` must be running and your user should be in the `bluetooth`
@@ -70,7 +70,7 @@ group (root is not required).
 
 ```sh
 sudo apt install build-essential debhelper libnewt-dev libsystemd-dev pkg-config
-dpkg-buildpackage -b -us -uc          # produces ../blthtui_<ver>_amd64.deb
+dpkg-buildpackage -b -us -uc          # produces ../bluetui_<ver>_amd64.deb
 ```
 
 Copy the resulting `.deb` to any Debian/Ubuntu machine and install it — `apt`
@@ -78,27 +78,27 @@ pulls in the runtime dependencies (`libnewt0.52`, `libsystemd0`, `bluez`)
 automatically:
 
 ```sh
-sudo apt install ./blthtui_0.2.0_amd64.deb
+sudo apt install ./bluetui_0.2.1_amd64.deb
 ```
 
-Remove with `sudo apt remove blthtui`.
+Remove with `sudo apt remove bluetui`.
 
-The build also produces `blthtui-dbgsym_<ver>_amd64.deb`. That package holds only
+The build also produces `bluetui-dbgsym_<ver>_amd64.deb`. That package holds only
 the debug symbols, split out of the binary by `dh_strip` and matched to it by
-Build-ID. It is not needed to run blthtui — install it alongside the main package
+Build-ID. It is not needed to run bluetui — install it alongside the main package
 when you want a readable backtrace out of `gdb` or a core dump.
 
 ## Debugging
 
-**Log mode.** Set `BLTHTUI_LOG` to a file path to record every D-Bus call,
+**Log mode.** Set `BLUETUI_LOG` to a file path to record every D-Bus call,
 its result and any error text (no-op when unset):
 
 ```sh
-BLTHTUI_LOG=/tmp/blthtui.log ./blthtui   # then, in another terminal:
-tail -f /tmp/blthtui.log
+BLUETUI_LOG=/tmp/bluetui.log ./bluetui   # then, in another terminal:
+tail -f /tmp/bluetui.log
 ```
 
-**Sanitizer build.** `make debug` produces `./blthtui-debug` with
+**Sanitizer build.** `make debug` produces `./bluetui-debug` with
 AddressSanitizer + UndefinedBehaviorSanitizer (catches leaks and bad memory
 use in the manual sd-bus message handling).
 
@@ -128,7 +128,7 @@ src/
   device.h   device model
   bt.c/.h    BlueZ access over sd-bus
   ui.c/.h    newt interface + main loop
-  log.c/.h   optional file logger (BLTHTUI_LOG)
+  log.c/.h   optional file logger (BLUETUI_LOG)
   main.c     entry point
 tools/
   bttest.c   headless debug harness (make test)

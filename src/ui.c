@@ -299,7 +299,7 @@ int ui_run(bt_ctx *ctx) {
     newtCls();
     newtPushHelpLine(" Enter: connect  p: pair  t: trust  d: details  r: remove"
                      "  s: scan  /: filter  q: quit");
-    newtDrawRootText(0, 0, "blthtui — Bluetooth manager");
+    newtDrawRootText(0, 0, "bluetui — Bluetooth manager");
 
     pick_adapter(ctx);
 

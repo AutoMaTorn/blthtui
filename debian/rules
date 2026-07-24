@@ -12,4 +12,4 @@ override_dh_auto_test:
 # Our Makefile defaults PREFIX to /usr/local (correct for a manual install),
 # but Debian packages must install under /usr.
 override_dh_auto_install:
-	$(MAKE) install DESTDIR=$(CURDIR)/debian/blthtui PREFIX=/usr
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/bluetui PREFIX=/usr

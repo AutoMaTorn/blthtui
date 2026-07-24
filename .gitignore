@@ -1,7 +1,7 @@
 # Build artifacts
 *.o
-/blthtui
-/blthtui-debug
+/bluetui
+/bluetui-debug
 /bttest
 
 # Debian build outputs
@@ -10,7 +10,7 @@
 *.buildinfo
 *.changes
 debian/.debhelper/
-debian/blthtui/
+debian/bluetui/
 debian/files
 debian/*.substvars
 debian/*.debhelper.log

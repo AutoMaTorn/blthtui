@@ -16,7 +16,7 @@
 #define DEVICE_IFACE  "org.bluez.Device1"
 #define AGENTMGR_IFACE "org.bluez.AgentManager1"
 #define AGENT_IFACE   "org.bluez.Agent1"
-#define AGENT_PATH    "/org/blthtui/agent"
+#define AGENT_PATH    "/org/bluetui/agent"
 #define AGENT_CAPS    "KeyboardDisplay"
 
 /* BlueZ answers Pair() only once the whole exchange is over, and that includes
