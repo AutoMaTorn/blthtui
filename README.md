@@ -1,4 +1,4 @@
-# blttui
+# blthtui
 
 *[Русская версия](README.ru.md)*
 
@@ -34,7 +34,7 @@ make
 ## Run
 
 ```sh
-./blttui
+./blthtui
 ```
 
 `bluetoothd` must be running and your user should be in the `bluetooth`
@@ -55,7 +55,7 @@ group (root is not required).
 
 ```sh
 sudo apt install build-essential debhelper libnewt-dev libsystemd-dev pkg-config
-dpkg-buildpackage -b -us -uc          # produces ../blttui_<ver>_amd64.deb
+dpkg-buildpackage -b -us -uc          # produces ../blthtui_<ver>_amd64.deb
 ```
 
 Copy the resulting `.deb` to any Debian/Ubuntu machine and install it — `apt`
@@ -63,26 +63,26 @@ pulls in the runtime dependencies (`libnewt0.52`, `libsystemd0`, `bluez`)
 automatically:
 
 ```sh
-sudo apt install ./blttui_0.1.0_amd64.deb
+sudo apt install ./blthtui_0.1.0_amd64.deb
 ```
 
-Remove with `sudo apt remove blttui`.
+Remove with `sudo apt remove blthtui`.
 
-The build also produces `blttui-dbgsym_<ver>_amd64.deb`. That package holds only
+The build also produces `blthtui-dbgsym_<ver>_amd64.deb`. That package holds only
 the debug symbols, split out of the binary by `dh_strip` and matched to it by
-Build-ID. It is not needed to run blttui — install it alongside the main package
+Build-ID. It is not needed to run blthtui — install it alongside the main package
 when you want a readable backtrace out of `gdb` or a core dump.
 
 ### Hosting your own apt repository
 
-To let machines `apt install blttui` from a URL, publish the `.deb` with a
+To let machines `apt install blthtui` from a URL, publish the `.deb` with a
 tool like `reprepro` or `aptly` on a web server, sign it with a GPG key, and on
 each client:
 
 ```sh
-echo "deb [signed-by=/usr/share/keyrings/blttui.gpg] https://you.example/apt ./" \
-    | sudo tee /etc/apt/sources.list.d/blttui.list
-sudo apt update && sudo apt install blttui
+echo "deb [signed-by=/usr/share/keyrings/blthtui.gpg] https://you.example/apt ./" \
+    | sudo tee /etc/apt/sources.list.d/blthtui.list
+sudo apt update && sudo apt install blthtui
 ```
 
 For Ubuntu specifically, a Launchpad **PPA** builds the `.deb` from source for
@@ -91,15 +91,15 @@ sponsoring maintainer.
 
 ## Debugging
 
-**Log mode.** Set `BLTTUI_LOG` to a file path to record every D-Bus call,
+**Log mode.** Set `BLTHTUI_LOG` to a file path to record every D-Bus call,
 its result and any error text (no-op when unset):
 
 ```sh
-BLTTUI_LOG=/tmp/blttui.log ./blttui   # then, in another terminal:
-tail -f /tmp/blttui.log
+BLTHTUI_LOG=/tmp/blthtui.log ./blthtui   # then, in another terminal:
+tail -f /tmp/blthtui.log
 ```
 
-**Sanitizer build.** `make debug` produces `./blttui-debug` with
+**Sanitizer build.** `make debug` produces `./blthtui-debug` with
 AddressSanitizer + UndefinedBehaviorSanitizer (catches leaks and bad memory
 use in the manual sd-bus message handling).
 
@@ -129,7 +129,7 @@ src/
   device.h   device model
   bt.c/.h    BlueZ access over sd-bus
   ui.c/.h    newt interface + main loop
-  log.c/.h   optional file logger (BLTTUI_LOG)
+  log.c/.h   optional file logger (BLTHTUI_LOG)
   main.c     entry point
 tools/
   bttest.c   headless debug harness (make test)
@@ -151,4 +151,4 @@ harness build without newt.
 
 ## License
 
-MIT — see `debian/copyright`.
+MIT — see [LICENSE](LICENSE).

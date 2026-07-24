@@ -1,5 +1,5 @@
-#ifndef BLTTUI_UI_H
-#define BLTTUI_UI_H
+#ifndef BLTHTUI_UI_H
+#define BLTHTUI_UI_H
 
 #include "bt.h"
 
@@ -7,4 +7,4 @@
  * Owns newtInit()/newtFinished(). Returns 0 on normal exit. */
 int ui_run(bt_ctx *ctx);
 
-#endif /* BLTTUI_UI_H */
+#endif /* BLTHTUI_UI_H */

@@ -1,4 +1,4 @@
-Source: blttui
+Source: blthtui
 Section: admin
 Priority: optional
 Maintainer: Torn <automatorn@gmail.com>
@@ -9,11 +9,11 @@ Build-Depends: debhelper-compat (= 13),
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 
-Package: blttui
+Package: blthtui
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, bluez
 Description: lightweight nmtui-style TUI for Bluetooth
- blttui is a small, fast terminal interface for managing Bluetooth on Linux,
+ blthtui is a small, fast terminal interface for managing Bluetooth on Linux,
  styled after NetworkManager's nmtui. It talks to BlueZ over D-Bus and lets
  you:
  .

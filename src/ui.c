@@ -122,7 +122,7 @@ int ui_run(bt_ctx *ctx) {
     newtInit();
     newtCls();
     newtPushHelpLine(" Enter: connect/disconnect   Tab: move   F10/Esc/q: quit");
-    newtDrawRootText(0, 0, "blttui — Bluetooth manager");
+    newtDrawRootText(0, 0, "blthtui — Bluetooth manager");
 
     /* Register the pairing agent now that newt can draw the prompts. */
     bt_agent_cb agent = {

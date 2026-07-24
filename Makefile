@@ -15,7 +15,7 @@ BINDIR  ?= $(PREFIX)/bin
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
-BIN := blttui
+BIN := blthtui
 
 # Sources for the headless harness: everything except the UI/entry point.
 LIBSRC := src/bt.c src/log.c
@@ -37,9 +37,9 @@ src/log.o:  src/log.h
 src/main.o: src/bt.h src/ui.h src/log.h
 
 # Debug build: AddressSanitizer + UndefinedBehaviorSanitizer, no optimisation.
-# Produces ./blttui-debug (kept separate so it never clobbers the release objs).
+# Produces ./blthtui-debug (kept separate so it never clobbers the release objs).
 debug: $(SRC)
-	$(CC) $(DBGFLAGS) -Isrc $(SRC) -o blttui-debug $(DBGLIBS) -lnewt \
+	$(CC) $(DBGFLAGS) -Isrc $(SRC) -o blthtui-debug $(DBGLIBS) -lnewt \
 		-fsanitize=address,undefined
 
 # Headless harness for debugging the BlueZ layer without the TUI.
@@ -49,7 +49,7 @@ test: tools/bttest.c $(LIBSRC)
 		-fsanitize=address,undefined
 
 clean:
-	rm -f $(OBJ) $(BIN) blttui-debug bttest
+	rm -f $(OBJ) $(BIN) blthtui-debug bttest
 
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)

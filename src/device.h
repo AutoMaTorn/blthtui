@@ -1,5 +1,5 @@
-#ifndef BLTTUI_DEVICE_H
-#define BLTTUI_DEVICE_H
+#ifndef BLTHTUI_DEVICE_H
+#define BLTHTUI_DEVICE_H
 
 #include <stdbool.h>
 
@@ -20,4 +20,4 @@ typedef struct {
     bool has_rssi;
 } bt_device;
 
-#endif /* BLTTUI_DEVICE_H */
+#endif /* BLTHTUI_DEVICE_H */

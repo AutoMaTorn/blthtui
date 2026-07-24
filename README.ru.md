@@ -1,4 +1,4 @@
-# blttui
+# blthtui
 
 *[English version](README.md)*
 
@@ -34,7 +34,7 @@ make
 ## Запуск
 
 ```sh
-./blttui
+./blthtui
 ```
 
 `bluetoothd` должен быть запущен, а ваш пользователь — состоять в группе
@@ -55,7 +55,7 @@ make
 
 ```sh
 sudo apt install build-essential debhelper libnewt-dev libsystemd-dev pkg-config
-dpkg-buildpackage -b -us -uc          # создаст ../blttui_<версия>_amd64.deb
+dpkg-buildpackage -b -us -uc          # создаст ../blthtui_<версия>_amd64.deb
 ```
 
 Скопируйте получившийся `.deb` на любую машину с Debian или Ubuntu и
@@ -63,27 +63,27 @@ dpkg-buildpackage -b -us -uc          # создаст ../blttui_<версия>_
 `bluez`):
 
 ```sh
-sudo apt install ./blttui_0.1.0_amd64.deb
+sudo apt install ./blthtui_0.1.0_amd64.deb
 ```
 
-Удаление: `sudo apt remove blttui`.
+Удаление: `sudo apt remove blthtui`.
 
-Вместе с основным пакетом собирается `blttui-dbgsym_<версия>_amd64.deb`. В нём
+Вместе с основным пакетом собирается `blthtui-dbgsym_<версия>_amd64.deb`. В нём
 лежат только отладочные символы: `dh_strip` вырезает их из бинарника и
-связывает с ним по Build-ID. Для работы blttui он не нужен — ставьте его рядом
+связывает с ним по Build-ID. Для работы blthtui он не нужен — ставьте его рядом
 с основным пакетом, когда нужен читаемый бэктрейс в `gdb` или при разборе core
 dump.
 
 ### Собственный apt-репозиторий
 
-Чтобы на машинах работало `apt install blttui` по URL, опубликуйте `.deb` на
+Чтобы на машинах работало `apt install blthtui` по URL, опубликуйте `.deb` на
 веб-сервере с помощью `reprepro` или `aptly`, подпишите GPG-ключом, а на каждом
 клиенте выполните:
 
 ```sh
-echo "deb [signed-by=/usr/share/keyrings/blttui.gpg] https://you.example/apt ./" \
-    | sudo tee /etc/apt/sources.list.d/blttui.list
-sudo apt update && sudo apt install blttui
+echo "deb [signed-by=/usr/share/keyrings/blthtui.gpg] https://you.example/apt ./" \
+    | sudo tee /etc/apt/sources.list.d/blthtui.list
+sudo apt update && sudo apt install blthtui
 ```
 
 Для Ubuntu есть **PPA** на Launchpad — он собирает `.deb` из исходников за вас.
@@ -91,15 +91,15 @@ sudo apt update && sudo apt install blttui
 
 ## Отладка
 
-**Режим лога.** Укажите в `BLTTUI_LOG` путь к файлу, чтобы записывать каждый
+**Режим лога.** Укажите в `BLTHTUI_LOG` путь к файлу, чтобы записывать каждый
 вызов D-Bus, его результат и текст ошибки (без переменной ничего не пишется):
 
 ```sh
-BLTTUI_LOG=/tmp/blttui.log ./blttui   # затем в другом терминале:
-tail -f /tmp/blttui.log
+BLTHTUI_LOG=/tmp/blthtui.log ./blthtui   # затем в другом терминале:
+tail -f /tmp/blthtui.log
 ```
 
-**Сборка с санитайзерами.** `make debug` создаёт `./blttui-debug` с
+**Сборка с санитайзерами.** `make debug` создаёт `./blthtui-debug` с
 AddressSanitizer и UndefinedBehaviorSanitizer — они ловят утечки и некорректную
 работу с памятью в ручном разборе сообщений sd-bus.
 
@@ -129,7 +129,7 @@ src/
   device.h   модель устройства
   bt.c/.h    доступ к BlueZ через sd-bus
   ui.c/.h    интерфейс на newt + главный цикл
-  log.c/.h   опциональный файловый лог (BLTTUI_LOG)
+  log.c/.h   опциональный файловый лог (BLTHTUI_LOG)
   main.c     точка входа
 tools/
   bttest.c   headless-харнесс для отладки (make test)
@@ -151,4 +151,4 @@ debian/      сборка пакета Debian (native 3.0, debhelper 13)
 
 ## Лицензия
 
-MIT — см. `debian/copyright`.
+MIT — см. [LICENSE](LICENSE).

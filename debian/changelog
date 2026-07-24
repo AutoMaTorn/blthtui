@@ -1,4 +1,4 @@
-blttui (0.1.0) unstable; urgency=medium
+blthtui (0.1.0) unstable; urgency=medium
 
   * Initial release: adapter toggle, scan, connect/disconnect, pair/remove,
     interactive pairing agent, live signal-driven device list.

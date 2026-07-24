@@ -1,5 +1,5 @@
-#ifndef BLTTUI_BT_H
-#define BLTTUI_BT_H
+#ifndef BLTHTUI_BT_H
+#define BLTHTUI_BT_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -67,4 +67,4 @@ typedef struct {
  * Failure to become the *default* agent is non-fatal and logged. */
 int bt_register_agent(bt_ctx *ctx, const bt_agent_cb *cb);
 
-#endif /* BLTTUI_BT_H */
+#endif /* BLTHTUI_BT_H */
