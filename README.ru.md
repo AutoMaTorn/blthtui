@@ -74,21 +74,6 @@ sudo apt install ./blthtui_0.1.0_amd64.deb
 с основным пакетом, когда нужен читаемый бэктрейс в `gdb` или при разборе core
 dump.
 
-### Собственный apt-репозиторий
-
-Чтобы на машинах работало `apt install blthtui` по URL, опубликуйте `.deb` на
-веб-сервере с помощью `reprepro` или `aptly`, подпишите GPG-ключом, а на каждом
-клиенте выполните:
-
-```sh
-echo "deb [signed-by=/usr/share/keyrings/blthtui.gpg] https://you.example/apt ./" \
-    | sudo tee /etc/apt/sources.list.d/blthtui.list
-sudo apt update && sudo apt install blthtui
-```
-
-Для Ubuntu есть **PPA** на Launchpad — он собирает `.deb` из исходников за вас.
-Попадание в официальный архив Debian требует ITP-бага и мейнтейнера-спонсора.
-
 ## Отладка
 
 **Режим лога.** Укажите в `BLTHTUI_LOG` путь к файлу, чтобы записывать каждый
