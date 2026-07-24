@@ -1,4 +1,4 @@
-blthtui (0.2.1) unstable; urgency=medium
+blthtui (0.2.1) UNRELEASED; urgency=medium
 
   * Keep the list cursor in place when it is parked on the "list full" notice:
     the notice row no longer overwrites the remembered selection, which used to
