@@ -1,17 +1,18 @@
-#define _XOPEN_SOURCE 700 /* expose wcwidth() under -std=c11 */
+#define _POSIX_C_SOURCE 200809L /* clock_gettime, sigaction under -std=c11 */
 
 #include "ui.h"
 #include "log.h"
+#include "strutil.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <newt.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <wchar.h>
+#include <unistd.h>
 
 #define REFRESH_MS    4000 /* safety net; signals do the real work */
 #define MIN_REDRAW_MS 100  /* coalesce bursts: at most ~10 redraws a second */
@@ -21,6 +22,24 @@ static long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Self-pipe trick for Ctrl-C/SIGTERM. A signal handler may only do
+ * async-signal-safe things, and what we actually need is for newtFormRun to
+ * wake up: writing a byte here makes the watched fd readable, the main loop
+ * sees quit_signalled and exits — which is what finally runs bt_close()
+ * (stops the discovery we started, unregisters the pairing agent) instead of
+ * leaving both behind on the bus. */
+static volatile sig_atomic_t quit_signalled;
+static int quit_pipe[2] = { -1, -1 };
+
+static void on_quit_signal(int sig) {
+    (void)sig;
+    quit_signalled = 1;
+    if (quit_pipe[1] >= 0) {
+        char b = 0;
+        (void)!write(quit_pipe[1], &b, 1); /* ok if full: flag is already set */
+    }
 }
 
 /* `detail` is BlueZ's own explanation when we have one; it beats strerror on
@@ -50,18 +69,15 @@ static bool ui_request_passkey(void *ud, const char *dev, unsigned *out) {
     (void)ud;
     char *val = NULL;
     struct newtWinEntry items[] = {
-        { (char *)"Passkey:", &val, 0 },
+        { (char *)"Passkey:", &val, NEWT_FLAG_PASSWORD },
         { NULL, NULL, 0 },
     };
     char text[96];
     snprintf(text, sizeof text, "Enter the passkey shown on %s:", dev);
     int r = newtWinEntries((char *)"Pairing", text, 50, 5, 5, 20,
                            items, (char *)"OK", (char *)"Cancel", NULL);
-    bool ok = false;
-    if (r == 1 && val && *val) {
-        *out = (unsigned)strtoul(val, NULL, 10);
-        ok = true;
-    }
+    /* Garbage input is a rejected prompt, never passkey 0. */
+    bool ok = (r == 1 && val) && parse_passkey(val, out);
     free(val);
     return ok;
 }
@@ -70,7 +86,7 @@ static bool ui_request_pin(void *ud, const char *dev, char *buf, size_t sz) {
     (void)ud;
     char *val = NULL;
     struct newtWinEntry items[] = {
-        { (char *)"PIN:", &val, 0 },
+        { (char *)"PIN:", &val, NEWT_FLAG_PASSWORD },
         { NULL, NULL, 0 },
     };
     char text[96];
@@ -89,56 +105,6 @@ static bool ui_request_pin(void *ud, const char *dev, char *buf, size_t sz) {
 static void ui_display(void *ud, const char *dev, const char *what) {
     (void)ud;
     newtWinMessage((char *)"Pairing", (char *)"OK", "%s\n\n%s", dev, what);
-}
-
-/* Copy at most `cols` terminal columns of UTF-8 text into buf, then pad with
- * spaces to exactly that width.
- *
- * printf's "%-40.40s" cannot do this: its precision counts BYTES. A device
- * named in Cyrillic — or with the emoji vendors love — gets cut mid-character,
- * the terminal prints replacement garbage, and every column after it slides.
- * Non-printing characters become '?' rather than reaching the terminal, since
- * device names are attacker-supplied and an embedded escape sequence would
- * otherwise be interpreted. */
-static void pad_utf8(char *buf, size_t bufsz, const char *src, int cols) {
-    size_t out = 0;
-    int used = 0;
-    mbstate_t st;
-    memset(&st, 0, sizeof st);
-
-    while (*src && used < cols) {
-        wchar_t wc = 0;
-        size_t n = mbrtowc(&wc, src, MB_CUR_MAX, &st);
-        int w;
-
-        if (n == (size_t)-1 || n == (size_t)-2) { /* invalid or truncated */
-            memset(&st, 0, sizeof st);
-            n = 1;
-            w = 1;
-            wc = L'?';
-        } else if (n == 0) {
-            break;                                /* embedded NUL */
-        } else {
-            w = wcwidth(wc);
-            if (w < 0) { w = 1; wc = L'?'; }      /* control character */
-        }
-
-        if (used + w > cols) break;               /* would overrun the budget */
-
-        if (wc == L'?' ) {
-            if (out + 1 >= bufsz) break;
-            buf[out++] = '?';
-        } else {
-            if (out + n >= bufsz) break;
-            memcpy(buf + out, src, n);
-            out += n;
-        }
-        src  += n;
-        used += w;
-    }
-
-    while (used < cols && out + 1 < bufsz) { buf[out++] = ' '; used++; }
-    buf[out] = '\0';
 }
 
 /* Build a one-line listbox label for a device: name only (BlueZ already
@@ -160,18 +126,12 @@ typedef struct {
     bool paired_only;
 } ui_view;
 
-/* Case-insensitive substring match, ASCII folding only — enough for the
- * "type a few letters to find your headset" case this serves. */
-static bool name_matches(const char *name, const char *needle) {
-    if (!*needle) return true;
-    size_t nl = strlen(needle);
-    for (const char *p = name; *p; p++) {
-        size_t i = 0;
-        while (i < nl && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
-            i++;
-        if (i == nl) return true;
-    }
-    return false;
+/* True when there is no adapter to act on; says so instead of letting the
+ * D-Bus call fail on an empty object path with a cryptic error. */
+static bool no_adapter(bt_ctx *ctx, const char *action) {
+    if (bt_ensure_adapter(ctx) == 0) return false;
+    show_error(action, -ENODEV, "no Bluetooth adapter");
+    return true;
 }
 
 /* Redraw from the model. No bus traffic at all in the common case: the device
@@ -297,8 +257,8 @@ static void pick_adapter(bt_ctx *ctx) {
 int ui_run(bt_ctx *ctx) {
     newtInit();
     newtCls();
-    newtPushHelpLine(" Enter: connect  p: pair  t: trust  d: details  r: remove"
-                     "  s: scan  /: filter  q: quit");
+    newtPushHelpLine(" Enter: connect  p: pair  t: trust  o: paired-only"
+                     "  d: details  r: remove  s: scan  /: filter  q: quit");
     newtDrawRootText(0, 0, "bluetui — Bluetooth manager");
 
     pick_adapter(ctx);
@@ -345,6 +305,23 @@ int ui_run(bt_ctx *ctx) {
     if (busfd >= 0)
         newtFormWatchFd(form, busfd, NEWT_FD_READ);
 
+    /* Arm the quit-signal pipe: the handler writes a byte, the watched fd
+     * wakes the form, the loop below checks quit_signalled. */
+    struct sigaction sa = { .sa_handler = on_quit_signal }, old_int, old_term;
+    bool signals_armed = false;
+    if (pipe(quit_pipe) == 0 &&
+        sigaction(SIGINT, NULL, &old_int) == 0 &&
+        sigaction(SIGTERM, NULL, &old_term) == 0 &&
+        sigaction(SIGINT, &sa, NULL) == 0 &&
+        sigaction(SIGTERM, &sa, NULL) == 0) {
+        newtFormWatchFd(form, quit_pipe[0], NEWT_FD_READ);
+        signals_armed = true;
+    } else if (quit_pipe[0] >= 0) {
+        close(quit_pipe[0]);
+        close(quit_pipe[1]);
+        quit_pipe[0] = quit_pipe[1] = -1;
+    }
+
     static bt_device devs[BT_MAX_DEVICES]; /* static: too big for the stack */
     ui_view view = { .filter = "", .paired_only = false };
     int selected = 0;
@@ -356,6 +333,9 @@ int ui_run(bt_ctx *ctx) {
     while (running) {
         struct newtExitStruct es;
         newtFormRun(form, &es);
+
+        /* Ctrl-C / SIGTERM: the handler poked the pipe and woke the form. */
+        if (quit_signalled) break;
 
         /* Drain the bus first: applies every signal to the model and runs any
          * agent method calls. Safe here — no form is running mid-dispatch. */
@@ -385,9 +365,12 @@ int ui_run(bt_ctx *ctx) {
             if (key == NEWT_KEY_ESCAPE || key == NEWT_KEY_F10 || key == 'q') {
                 running = 0;
             } else if (key == 's') {
-                r = bt_discovering(ctx) ? bt_stop_discovery(ctx, bterr, sizeof bterr)
-                                        : bt_start_discovery(ctx, bterr, sizeof bterr);
-                if (r < 0) show_error("Discovery", r, bterr);
+                if (!no_adapter(ctx, "Discovery")) {
+                    r = bt_discovering(ctx)
+                        ? bt_stop_discovery(ctx, bterr, sizeof bterr)
+                        : bt_start_discovery(ctx, bterr, sizeof bterr);
+                    if (r < 0) show_error("Discovery", r, bterr);
+                }
             } else if (key == 'o') {
                 view.paired_only = !view.paired_only;
                 selected = 0;
@@ -428,12 +411,16 @@ int ui_run(bt_ctx *ctx) {
             if (c == b_quit) {
                 running = 0;
             } else if (c == b_power) {
-                if ((r = bt_set_powered(ctx, !bt_powered(ctx), bterr, sizeof bterr)) < 0)
+                if (!no_adapter(ctx, "Toggle power") &&
+                    (r = bt_set_powered(ctx, !bt_powered(ctx), bterr, sizeof bterr)) < 0)
                     show_error("Toggle power", r, bterr);
             } else if (c == b_scan) {
-                r = bt_discovering(ctx) ? bt_stop_discovery(ctx, bterr, sizeof bterr)
-                                        : bt_start_discovery(ctx, bterr, sizeof bterr);
-                if (r < 0) show_error("Discovery", r, bterr);
+                if (!no_adapter(ctx, "Discovery")) {
+                    r = bt_discovering(ctx)
+                        ? bt_stop_discovery(ctx, bterr, sizeof bterr)
+                        : bt_start_discovery(ctx, bterr, sizeof bterr);
+                    if (r < 0) show_error("Discovery", r, bterr);
+                }
             } else if (c == b_pair && sel) {
                 if ((r = bt_action_start(ctx, sel->path, BT_ACT_PAIR,
                                          bterr, sizeof bterr)) < 0)
@@ -469,6 +456,15 @@ int ui_run(bt_ctx *ctx) {
         }
     }
 
+    if (signals_armed) {
+        sigaction(SIGINT, &old_int, NULL);
+        sigaction(SIGTERM, &old_term, NULL);
+    }
+    if (quit_pipe[0] >= 0) {
+        close(quit_pipe[0]);
+        close(quit_pipe[1]);
+        quit_pipe[0] = quit_pipe[1] = -1;
+    }
     newtFormDestroy(form);
     newtPopWindow();
     newtPopHelpLine();

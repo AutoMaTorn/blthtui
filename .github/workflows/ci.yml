@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    # amd64 + arm64 (ubuntu-24.04-arm runners are free for public repos)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libnewt-dev libsystemd-dev pkg-config
+
+      # Command-line CFLAGS replaces the Makefile's += default, so the full
+      # flag set is repeated here with -Werror on top.
+      - name: Build with -Werror
+        run: make CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror"
+
+      - name: Unit tests (make check)
+        run: make check
+
+      - name: Headless harness builds (make test)
+        run: make test
+
+  cppcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      # `style` is deliberately left out: it flags per-file unusedFunction on
+      # helpers that are only used from other translation units.
+      - name: Static analysis
+        run: >
+          cppcheck --std=c11 --enable=warning,performance,portability
+          --error-exitcode=1 -Isrc src/ tools/ tests/
+
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential debhelper lintian \
+            libnewt-dev libsystemd-dev pkg-config
+
+      - name: Build the .deb
+        run: dpkg-buildpackage -b -us -uc
+
+      - name: Lintian
+        run: lintian --fail-on warning ../bluetui_*_amd64.deb

@@ -2,6 +2,7 @@
 
 #include "bt.h"
 #include "log.h"
+#include "strutil.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -218,7 +219,9 @@ static int walk_objects(sd_bus *bus,
                                "org.freedesktop.DBus.ObjectManager",
                                "GetManagedObjects", &err, &m, "");
     if (r < 0) {
-        fprintf(stderr, "GetManagedObjects: %s\n", err.message ? err.message : strerror(-r));
+        /* Log, don't fprintf: in the TUI a stray stderr line lands on top of
+         * the newt screen. bt_open() reports the failure through *err. */
+        log_msg("GetManagedObjects: %s", err.message ? err.message : strerror(-r));
         sd_bus_error_free(&err);
         return r;
     }
@@ -530,25 +533,6 @@ int bt_stop_discovery(bt_ctx *ctx, char *err, size_t errsz) {
     int r = adapter_method(ctx, "StopDiscovery", err, errsz);
     if (r >= 0) ctx->we_started_discovery = false;
     return r;
-}
-
-/* Sort key: connected first, then paired, then the rest. */
-static int dev_rank(const bt_device *d) {
-    return d->connected ? 0 : (d->paired ? 1 : 2);
-}
-
-static int dev_cmp(const void *a, const void *b) {
-    const bt_device *x = a, *y = b;
-    int rx = dev_rank(x), ry = dev_rank(y);
-    if (rx != ry) return rx - ry;
-
-    /* Among the "other" (nearby, unpaired) devices, order by signal strength:
-     * strongest first, entries with a known RSSI ahead of those without. */
-    if (rx == 2) {
-        if (x->has_rssi != y->has_rssi) return x->has_rssi ? -1 : 1;
-        if (x->has_rssi && x->rssi != y->rssi) return y->rssi - x->rssi;
-    }
-    return strcmp(x->name, y->name); /* alphabetical fallback within a group */
 }
 
 /* Extra detail the list has no room for. Fetched on demand — a details window
@@ -968,6 +952,10 @@ int bt_register_agent(bt_ctx *ctx, const bt_agent_cb *cb) {
         log_msg("agent: RegisterAgent failed: %s",
                 err.message ? err.message : strerror(-r));
         sd_bus_error_free(&err);
+        /* Take the exported object down with us: an agent BlueZ never accepted
+         * must not stay answerable on the bus. */
+        ctx->agent_slot = sd_bus_slot_unref(ctx->agent_slot);
+        ctx->agent_set = false;
         return r;
     }
     ctx->agent_registered = true;

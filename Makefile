@@ -12,15 +12,16 @@ DBGLIBS  := $(shell pkg-config --libs libsystemd)
 
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
+MANDIR  ?= $(PREFIX)/share/man
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
 BIN := bluetui
 
 # Sources for the headless harness: everything except the UI/entry point.
-LIBSRC := src/bt.c src/log.c
+LIBSRC := src/bt.c src/log.c src/strutil.c
 
-.PHONY: all clean install uninstall debug test
+.PHONY: all clean install uninstall debug test check
 
 all: $(BIN)
 
@@ -31,10 +32,11 @@ src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 # Header dependencies
-src/bt.o:   src/bt.h src/device.h src/log.h
-src/ui.o:   src/ui.h src/bt.h src/device.h src/log.h
-src/log.o:  src/log.h
-src/main.o: src/bt.h src/ui.h src/log.h
+src/bt.o:      src/bt.h src/device.h src/log.h src/strutil.h
+src/ui.o:      src/ui.h src/bt.h src/device.h src/log.h src/strutil.h
+src/log.o:     src/log.h
+src/main.o:    src/bt.h src/ui.h src/log.h
+src/strutil.o: src/strutil.h src/device.h
 
 # Debug build: AddressSanitizer + UndefinedBehaviorSanitizer, no optimisation.
 # Produces ./bluetui-debug (kept separate so it never clobbers the release objs).
@@ -48,11 +50,19 @@ test: tools/bttest.c $(LIBSRC)
 	$(CC) $(DBGFLAGS) -Isrc tools/bttest.c $(LIBSRC) -o bttest $(DBGLIBS) \
 		-fsanitize=address,undefined
 
+# Unit tests for the pure helpers (strutil.c): no D-Bus, no newt, no hardware.
+check: tests/test_strutil.c src/strutil.c src/strutil.h src/device.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -Werror \
+		tests/test_strutil.c src/strutil.c -o test_strutil
+	./test_strutil
+
 clean:
-	rm -f $(OBJ) $(BIN) bluetui-debug bttest
+	rm -f $(OBJ) $(BIN) bluetui-debug bttest test_strutil
 
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
+	install -Dm644 $(BIN).1 $(DESTDIR)$(MANDIR)/man1/$(BIN).1
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
+	rm -f $(DESTDIR)$(MANDIR)/man1/$(BIN).1

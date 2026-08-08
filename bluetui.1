@@ -1,0 +1,89 @@
+.TH BLUETUI 1 "August 2026" "bluetui 0.2.1" "User Commands"
+.SH NAME
+bluetui \- nmtui-style terminal UI for managing Bluetooth devices
+.SH SYNOPSIS
+.B bluetui
+.SH DESCRIPTION
+.B bluetui
+is a lightweight terminal user interface for managing Bluetooth on Linux,
+modelled after NetworkManager's
+.BR nmtui (1).
+It talks to BlueZ over D-Bus (via sd-bus from libsystemd) and draws its
+interface with newt. No configuration, no daemon of its own: it runs anywhere
+you have a terminal and a running
+.BR bluetoothd (8).
+.PP
+The device list updates live from BlueZ signals. Connected devices are marked
+with
+.BR * ,
+paired ones with
+.BR + ;
+connected and paired devices sort to the top, the rest by signal strength.
+If more than one Bluetooth adapter is present, a picker is offered at startup.
+.PP
+bluetui registers itself as a BlueZ pairing agent
+.RB ( org.bluez.Agent1 ,
+.SM KeyboardDisplay
+capabilities), so pairing dialogs — PIN entry, passkey entry, passkey
+confirmation — are shown and answered inside the program.
+.PP
+Connect, disconnect and pair run asynchronously: the interface stays live and
+shows the operation in progress. A pairing dialog left unanswered for more
+than 180 seconds ends with a timeout.
+.PP
+On exit — including
+.BR SIGINT " (Ctrl-C) and " SIGTERM
+— bluetui stops the discovery it started and unregisters its pairing agent.
+.SH KEYS
+.TP
+.B Up / Down
+Move in the device list.
+.TP
+.B Enter
+Connect / disconnect the selected device.
+.TP
+.B p
+Pair the selected device.
+.TP
+.B t
+Toggle trust on the selected device.
+.TP
+.B o
+Toggle showing only paired devices.
+.TP
+.B d
+Show device details: battery level, device type, service UUIDs.
+.TP
+.B r
+Remove the selected device (asks for confirmation).
+.TP
+.B s
+Start / stop scanning.
+.TP
+.B /
+Filter the device list by name.
+.TP
+.B Tab
+Move between the list and the buttons.
+.TP
+.BR q ", " Esc ", " F10
+Quit.
+.SH ENVIRONMENT
+.TP
+.B BLUETUI_LOG
+When set to a writable file path, every D-Bus call, its result and any error
+text are appended to that file. Unset (the default), logging is a no-op.
+.SH NOTES
+The device list is capped at 256 entries; a "list full" row is shown when it
+overflows. Device details show at most 8 service UUIDs.
+.PP
+bluetoothd must be running, and the user should be in the
+.B bluetooth
+group; root is not required.
+.SH SEE ALSO
+.BR bluetoothctl (1),
+.BR nmtui (1),
+.BR bluetoothd (8)
+.SH AUTHOR
+bluetui is free software, distributed under the MIT license.
+Project page: https://github.com/AutoMaTorn/bluetui

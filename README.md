@@ -29,6 +29,9 @@ have a terminal and `bluetoothd`.
 - Paired (`+`) and connected (`*`) markers; connected and paired devices sort
   to the top, the rest by signal strength
 - Device names in any language render correctly (UTF-8-aware, width-correct)
+- PIN / passkey entry is hidden (password-style) and validated
+- Clean exit on Ctrl-C / SIGTERM: stops the discovery it started and
+  unregisters the pairing agent instead of leaving both behind on the bus
 
 ## Build
 
@@ -111,6 +114,14 @@ prints the adapter, its state and the device list, and asserts nothing.
 make test && ./bttest
 ```
 
+**Unit tests.** `make check` builds and runs `tests/test_strutil.c` — plain
+asserts over the pure helpers (UTF-8 padding, device sorting, name filter,
+passkey parsing). No D-Bus, no newt, no hardware needed, so it runs anywhere.
+
+```sh
+make check
+```
+
 **Live D-Bus tracing** (no build needed):
 
 ```sh
@@ -125,14 +136,17 @@ busctl introspect org.bluez /org/bluez/hci0
 
 ```
 src/
-  device.h   device model
-  bt.c/.h    BlueZ access over sd-bus
-  ui.c/.h    newt interface + main loop
-  log.c/.h   optional file logger (BLUETUI_LOG)
-  main.c     entry point
+  device.h     device model
+  bt.c/.h      BlueZ access over sd-bus
+  ui.c/.h      newt interface + main loop
+  strutil.c/.h pure helpers: UTF-8 padding, sorting, filter, passkey parsing
+  log.c/.h     optional file logger (BLUETUI_LOG)
+  main.c       entry point
 tools/
-  bttest.c   headless debug harness (make test)
-debian/      Debian packaging (native 3.0, debhelper 13)
+  bttest.c     headless debug harness (make test)
+tests/
+  test_strutil.c  unit tests for the pure helpers (make check)
+debian/        Debian packaging (native 3.0, debhelper 13)
 ```
 
 `bt.c` never touches the UI: the pairing agent reaches the interface only
@@ -141,12 +155,13 @@ harness build without newt.
 
 ## Known limitations
 
-- Uses the first adapter found; there is no adapter picker yet.
-- Pairing prompts are answered inside a blocking `Pair()` call, so taking
-  longer than ~25 s to respond can time the attempt out.
-- Error dialogs show the `errno` string; the detailed BlueZ message goes to
-  the log.
-- The device list is capped at 128 entries.
+- The bus fd is watched for reading only; in the rare case sd-bus needs to
+  write or has its own timeout, it is serviced on the 4 s fallback timer.
+- A pairing dialog left unanswered for more than 180 s ends with a timeout.
+- The device list is capped at 256 entries; a "list full" row is shown when it
+  overflows.
+- The adapter picker is offered only at startup — no live switching mid-session
+  (a vanished adapter is re-acquired automatically).
 
 ## License
 
